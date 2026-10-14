@@ -71,6 +71,10 @@ struct DirectoryJob final {
     std::array<char, job_name_capacity> name{};
 };
 
+struct ByFileId final {
+    bool operator()(const FileId& left, const FileId& right) const { return left < right; }
+};
+
 struct ByName final {
     bool operator()(const PreviousChild& left, const PreviousChild& right) const { return left.name < right.name; }
 };
@@ -223,6 +227,12 @@ struct Scan::State final {
         }
     }
 
+    // True for a directory that must not be opened (ScanOptions::withheld).
+    bool withheld(const FileId file_id) const {
+        const bool result = std::binary_search(options.withheld.begin(), options.withheld.end(), file_id, ByFileId{});
+        return result;
+    }
+
     // Fills the workspace's scratch with a previous directory's children,
     // sorted by name.
     void gather_previous_children(Workspace& workspace, const NodeIndex directory) const {
@@ -290,6 +300,12 @@ struct Scan::State final {
             workspace.names.insert(workspace.names.end(), name.begin(), name.end());
             entry.name.offset = static_cast<std::uint32_t>(offset);
             entry.name.length = static_cast<std::uint32_t>(name.size());
+            const bool keep_closed = entry.kind == NodeKind::directory &&
+                                     entry.directory_state == DirectoryState::failed && withheld(entry.file_id);
+            if (keep_closed) {
+                entry.directory_state = DirectoryState::refused;
+                workspace.directories_withheld = workspace.directories_withheld + 1;
+            }
             const std::uint32_t entry_index = static_cast<std::uint32_t>(workspace.entries.size());
             workspace.entries.push_back(entry);
             if (entry.kind != NodeKind::directory || entry.directory_state != DirectoryState::failed) continue;
@@ -352,10 +368,15 @@ struct Scan::State final {
         std::uint64_t allocated = 0;
         for (std::uint32_t k = 0; k < result.entry_count; ++k) {
             const std::uint32_t entry_index = result.first_entry + k;
-            const ScanEntry& entry = workspace.entries[entry_index];
+            ScanEntry& entry = workspace.entries[entry_index];
             allocated += entry.allocated_bytes;
             if (entry.kind != NodeKind::directory) continue;
             if (entry.directory_state != DirectoryState::failed) continue;
+            if (withheld(entry.file_id)) {
+                entry.directory_state = DirectoryState::refused;
+                workspace.directories_withheld = workspace.directories_withheld + 1;
+                continue;
+            }
             if (entry.name.length >= job_name_capacity) continue;
             const std::string_view name(workspace.names.data() + entry.name.offset, entry.name.length);
             NodeIndex previous_child = no_node;
@@ -400,6 +421,7 @@ struct Scan::State final {
             statistics.bulk_calls += workspace.bulk_calls;
             statistics.directories_listed += workspace.directories_listed;
             statistics.directories_reused += workspace.directories_reused;
+            statistics.directories_withheld += workspace.directories_withheld;
         }
         statistics.walk_seconds = seconds_between(started, walked);
         if (failed) {
@@ -451,6 +473,8 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
     if (options.thread_count == 0) options.thread_count = logical_cpu_count();
     if (options.previous && options.marks.size() != (*options.previous).nodes.size())
         throw std::invalid_argument("reuse marks do not match the previous snapshot");
+    if (!std::is_sorted(options.withheld.begin(), options.withheld.end(), ByFileId{}))
+        throw std::invalid_argument("withheld directories are not sorted");
     state.options = std::move(options);
     raise_descriptor_limit();
 

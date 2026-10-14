@@ -9,6 +9,7 @@
 // cannot be trusted), and save the result back. --verify then also scans in
 // full and compares the two, node by node.
 
+#include "platform/macos/privacy.hpp"
 #include "refresh/refresh.hpp"
 #include "scan/scanner.hpp"
 #include "scan/snapshot.hpp"
@@ -128,9 +129,10 @@ void print_top_children(const cmac::Snapshot& snapshot, const std::uint32_t top)
 void print_statistics(const cmac::ScanStatistics& statistics) {
     std::printf("threads %u, peak open descriptors %u, bulk calls %llu\n", statistics.thread_count,
                 statistics.peak_open_descriptors, static_cast<unsigned long long>(statistics.bulk_calls));
-    std::printf("directories listed from disk %llu, copied from the saved scan %llu\n",
+    std::printf("directories listed from disk %llu, copied from the saved scan %llu, kept closed %llu\n",
                 static_cast<unsigned long long>(statistics.directories_listed),
-                static_cast<unsigned long long>(statistics.directories_reused));
+                static_cast<unsigned long long>(statistics.directories_reused),
+                static_cast<unsigned long long>(statistics.directories_withheld));
     std::printf("walk %.3f s, build %.3f s\n", statistics.walk_seconds, statistics.build_seconds);
     std::printf("files %llu, directories %llu, symbolic links %llu, others %llu\n",
                 static_cast<unsigned long long>(statistics.files),
@@ -317,10 +319,17 @@ int main(const int argc, char** const argv) {
     }
     try {
         int status = 0;
-        if (!command_line.cache.empty()) {
-            status = run_with_cache(command_line);
+        // As the app does: protected folders stay closed without Full Disk
+        // Access, so no consent prompt can stop the scan.
+        CommandLine scan_command = command_line;
+        const cmac::PrivacyAccess privacy = cmac::assess_privacy_access();
+        scan_command.options.withheld = privacy.withheld;
+        std::printf("full disk access: %s; %zu protected folders kept closed\n", privacy.full_disk_access ? "yes" : "no",
+                    privacy.withheld.size());
+        if (!scan_command.cache.empty()) {
+            status = run_with_cache(scan_command);
         } else {
-            ScanRun run = run_scan(command_line.options, command_line.show_progress);
+            ScanRun run = run_scan(scan_command.options, scan_command.show_progress);
             std::printf("outcome %s\n", run.complete ? "complete" : run.failure.c_str());
             print_statistics(run.statistics);
             if (!run.complete) {

@@ -69,6 +69,7 @@ struct Workspace final {
     std::uint64_t bulk_calls{0};
     std::uint64_t directories_listed{0};
     std::uint64_t directories_reused{0};
+    std::uint64_t directories_withheld{0};
     // Scratch for matching one relisted directory's children; reused.
     std::vector<PreviousChild> previous_children{};
 };

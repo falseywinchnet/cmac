@@ -1,5 +1,6 @@
 #include "app/main_window.hpp"
 
+#include "platform/macos/privacy.hpp"
 #include "platform/macos/show_in_finder.hpp"
 #include "treemap/treemap.hpp"
 
@@ -44,7 +45,8 @@ std::string format_count(const std::uint64_t count) {
 
 const char* kind_name(const Node& node) {
     if (node.kind == NodeKind::directory) {
-        if (node.directory_state == DirectoryState::refused) return "folder, protected (size unknown)";
+        if (node.directory_state == DirectoryState::refused)
+            return "folder, protected by macOS privacy (size unknown; Full Disk Access includes it)";
         if (node.directory_state == DirectoryState::mount_point) return "folder, another volume mounted here";
         if (node.directory_state == DirectoryState::failed) return "folder, could not be read";
         return "folder";
@@ -120,6 +122,11 @@ MainWindow::MainWindow(AppOptions options) : options_(std::move(options)) {
     (*detail_).set_bounds({12.0, 50.0, 4000.0, 20.0});
     (*show_in_finder_).set_bounds({12.0, 6.0, 130.0, 28.0});
     (*show_in_finder_).set_dock(gf::DockStyle::right);
+    full_disk_access_ =
+        gf::make_control<gf::Button>(gf::StableId("cmac.full_disk_access"), "Full Disk Access...");
+    (*full_disk_access_).set_bounds({12.0, 6.0, 150.0, 28.0});
+    (*full_disk_access_).set_dock(gf::DockStyle::right);
+    (*full_disk_access_).set_visible(false);
     (*header_).set_bounds({0.0, 0.0, 1280.0, header_height});
     (*header_).set_dock(gf::DockStyle::top);
     (*treemap_).set_dock(gf::DockStyle::fill);
@@ -128,6 +135,7 @@ MainWindow::MainWindow(AppOptions options) : options_(std::move(options)) {
     (*header_).add_child(path_);
     (*header_).add_child(detail_);
     (*header_).add_child(show_in_finder_);
+    (*header_).add_child(full_disk_access_);
     // Docking takes children backmost first: the header claims the top
     // before the treemap fills what is left.
     (*root).add_child(header_);
@@ -137,6 +145,7 @@ MainWindow::MainWindow(AppOptions options) : options_(std::move(options)) {
     gf::on((*treemap_).reveal_requested(), *this, &MainWindow::on_reveal);
     gf::on((*treemap_).picture_ready(), *this, &MainWindow::on_picture_ready);
     gf::on((*show_in_finder_).clicked(), *this, &MainWindow::on_reveal);
+    gf::on((*full_disk_access_).clicked(), *this, &MainWindow::on_full_disk_access);
 }
 
 MainWindow::~MainWindow() = default;
@@ -147,6 +156,10 @@ void MainWindow::start(gf::Window& window) {
     // volume group, not beside one folder.
     if (options_.root == "/") space_ = measure_container_space(options_.root);
     cache_path_ = default_snapshot_path(options_.root);
+    // Without Full Disk Access the protected folders stay closed, so macOS
+    // never stops the scan to ask (src/platform/macos/privacy.hpp).
+    privacy_ = assess_privacy_access();
+    (*full_disk_access_).set_visible(!privacy_.full_disk_access);
     poll_timer_ = std::make_unique<gf::Timer>(window, std::chrono::milliseconds(50));
     gf::on((*poll_timer_).tick(), *this, &MainWindow::poll);
     load_task_ = std::make_unique<LoadTask>();
@@ -229,6 +242,7 @@ void MainWindow::finish_plan() {
     refresh_reason_ = plan.incremental ? plan.reason : std::string{};
     ScanOptions scan_options{};
     scan_options.root = options_.root;
+    scan_options.withheld = privacy_.withheld;
     if (plan.incremental) {
         scan_options.previous = std::shared_ptr<const Snapshot>(saved_, &(*saved_).snapshot);
         scan_options.marks = std::move(plan.reuse.marks);
@@ -266,6 +280,8 @@ void MainWindow::finish_scan() {
     }
     if (statistics_.refused_directories > 0)
         summary_ += "; " + format_count(statistics_.refused_directories) + " protected folders not counted";
+    if (!privacy_.full_disk_access)
+        summary_ += " (give cmac Full Disk Access to count Desktop, Documents, Downloads, iCloud Drive and app data)";
     show_status(summary_);
     refreshed_shown_ = true;
     (*treemap_).set_snapshot(snapshot_, space_);
@@ -333,6 +349,10 @@ void MainWindow::on_reveal() {
     if (snapshot_ && selection.node != no_node) path = path_of(*snapshot_, selection.node);
     if (path.empty()) return;
     if (!show_in_finder(path)) show_status("Finder could not show " + path);
+}
+
+void MainWindow::on_full_disk_access() {
+    if (!open_full_disk_access_settings()) show_status("System Settings could not be opened");
 }
 
 void MainWindow::on_picture_ready() {

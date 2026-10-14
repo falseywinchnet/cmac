@@ -40,6 +40,10 @@ struct ScanOptions final {
     // for a full scan.
     std::shared_ptr<const Snapshot> previous{};
     std::vector<ReuseMark> marks{};
+    // Directories never to open, by file id, sorted (assess_privacy_access):
+    // without Full Disk Access, opening them would stop the scan on a
+    // macOS consent prompt. They are recorded as refused, size unknown.
+    std::vector<FileId> withheld{};
 };
 
 // Updated by the workers once per directory with relaxed order; for
@@ -64,6 +68,8 @@ struct ScanStatistics final {
     // Directories listed from disk, and copied from the previous snapshot.
     std::uint64_t directories_listed{0};
     std::uint64_t directories_reused{0};
+    // Protected directories left unopened (ScanOptions::withheld).
+    std::uint64_t directories_withheld{0};
     std::uint32_t thread_count{0};
     std::uint32_t peak_open_descriptors{0};
     // From the first worker's start to the last worker draining the queue,

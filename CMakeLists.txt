@@ -51,6 +51,7 @@ target_link_libraries(cmac_scan PUBLIC GUIForms::Threading)
 # The change journal (FSEvents) and the refresh decision built on it.
 add_library(cmac_refresh STATIC
     src/platform/macos/change_journal.cpp
+    src/platform/macos/privacy.cpp
     src/refresh/refresh.cpp)
 target_compile_options(cmac_refresh PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(cmac_refresh PUBLIC cmac_scan "-framework CoreServices")

@@ -4,6 +4,7 @@
 // polls it on the UI thread; nothing on a scan worker touches a control.
 
 #include "app/treemap_view.hpp"
+#include "platform/macos/privacy.hpp"
 #include "refresh/refresh.hpp"
 #include "scan/scanner.hpp"
 #include "scan/snapshot.hpp"
@@ -94,6 +95,7 @@ private:
     void on_selection_changed();
     void on_reveal();
     void on_picture_ready();
+    void on_full_disk_access();
     void show_status(const std::string& text);
 
     AppOptions options_{};
@@ -102,6 +104,8 @@ private:
     std::shared_ptr<gf::Label> path_{};
     std::shared_ptr<gf::Label> detail_{};
     std::shared_ptr<gf::Button> show_in_finder_{};
+    std::shared_ptr<gf::Button> full_disk_access_{};
+    PrivacyAccess privacy_{};
     std::shared_ptr<TreemapView> treemap_{};
     std::shared_ptr<const Snapshot> snapshot_{};
     ContainerSpace space_{};
