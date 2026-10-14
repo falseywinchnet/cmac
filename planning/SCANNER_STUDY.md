@@ -205,8 +205,9 @@ while the totals themselves drifted and were not authoritative.
    folders maintain-dir-stats itself, so that every subtree gets a skip
    signal. That writes a persistent flag into the user's file system through
    a private interface Apple documents only for empty folders, so it breaks
-   the read-only rule and needs re-verification on every macOS release. It
-   is decision D6 in `PLAN.md`, off unless the owner admits it.
+   the read-only rule and needs re-verification on every macOS release.
+   The owner declined it (D6, 2026-10-14); cmac only reads the counts of
+   folders the system marked.
 
 ## 6. Still to measure (gate of stage S1)
 

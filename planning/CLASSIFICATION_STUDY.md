@@ -57,16 +57,16 @@ user's decision; it may get its own mark, decision D4).
 
 ## 4. Yellow
 
-Space that belongs to the system rather than to the user's files:
+Space that belongs to the system rather than to the user's files, free
+space and virtual mapping:
 
-- **Swap:** `/System/Volumes/VM/swapfile*` (6 × 1 GiB on the study machine),
-  and any `sleepimage`.
 - **Free space:** the APFS container's free space, shared by all its
   volumes.
-- **Virtual mapping:** to be fixed by decision D2. Candidates: space held by
-  local snapshots, the container's other volumes (Preboot, Recovery, VM,
-  Update), and the difference between a volume's used space and the sum of
-  its files.
+- **Virtual mapping:** memory backing, meaning the swap files
+  (`/System/Volumes/VM/swapfile*`, 6 × 1 GiB on the study machine) and any
+  `sleepimage` (owner, D2, 2026-10-14). Local snapshots, the container's
+  other volumes and the unaccounted residual are shown, but in neutral
+  tiles, not yellow.
 
 ## 5. Ownership lines
 

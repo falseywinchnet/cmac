@@ -8,7 +8,9 @@ working on.
 ## What cmac is not
 
 - **Not a cleaner.** cmac never deletes, moves, renames, trashes, compresses,
-  rewrites or changes permissions on anything outside its own settings file.
+  rewrites, marks or changes permissions on anything. It writes only its own
+  settings file and its scan cache (the last snapshot, in its own cache
+  folder).
   No "clean", "free up" or "remove" command may be added. Revealing an item in
   Finder is the only outward action; whatever the user does there is theirs.
 - **Never reads file contents.** Metadata only (names, sizes, flags,
@@ -21,7 +23,8 @@ working on.
   is shown as protected, with its size unknown, and the user may grant Full
   Disk Access themselves. (`searchfs` was measured to return names inside
   protected folders; cmac does not use it to fill those holes. See
-  `planning/SCANNER_STUDY.md` §5.)
+  `planning/SCANNER_STUDY.md` §5.) Nor does it set APFS maintain-dir-stats
+  on any folder (owner, D6).
 
 ## Code style (mandatory)
 

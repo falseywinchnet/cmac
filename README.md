@@ -12,8 +12,8 @@ contents. The "c" is for that restraint: it is not a cleaner.
 
 - One treemap of the whole volume group (Macintosh HD as Finder shows it),
   plus the container space that no file accounts for.
-- **Yellow:** swap files, free space, and virtual mapping (space held by the
-  system rather than by your files; see `planning/PLAN.md`, decision D2).
+- **Yellow:** free space and virtual mapping (the swap files and the sleep
+  image).
 - **Red:** files in folders cmac believes are temporary (the tier table is in
   `planning/CLASSIFICATION_STUDY.md`). Red is a belief, not a recommendation.
 - **Added lines** shade the regions that belong to user folders and to system

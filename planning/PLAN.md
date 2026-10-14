@@ -61,24 +61,25 @@ Also record the measurements still open in `SCANNER_STUDY.md` §6.
 
 ### S2. Snapshot and rescan
 
-Depends on S1 and decision D7.
+Depends on S1.
 
 - A compact snapshot file of the last scan, read at launch in well under a
   second (state the measured time and size).
 - Rescan from the FSEvents journal since the stored event id, plus the
   user's open writers (libproc); revisit only changed folders.
-- Skip a subtree whose recursive generation count has not moved (folders
-  the system already marks; decision D6 for folders cmac would mark).
+- Skip a subtree whose recursive generation count has not moved (only
+  folders the system marked itself; cmac never marks, D6).
 
 Gate: time from launch to a complete, current picture on the second launch,
 and zero misses against a full walk after a scripted churn fixture.
 
 ### S3. Space accounting (the yellow)
 
-Depends on S1 and decision D2.
+Depends on S1.
 
-The container map: each volume's use, free space, swap files, and the
-system's virtual mapping. Free space from `statfs`; purgeable space through
+The container map: each volume's use, free space, and virtual mapping
+(swap files and the sleep image, D2), in yellow; snapshots, the other
+volumes and the residual shown in neutral tiles. Free space from `statfs`; purgeable space through
 Foundation's volume capacity keys (in `src/platform/macos/`); a signed,
 labelled residual for space no file accounts for.
 
@@ -113,7 +114,7 @@ Gate: full repaint time at 2560 × 1600 device pixels for the S1 snapshot of
 
 ### S6. Application
 
-Depends on S3, S4, S5 and decision D1.
+Depends on S3, S4, S5 and the GUI.Forms ribbon (D1).
 
 The GUI.Forms window: ribbon, folder list synchronized with the treemap,
 status line, "Show in Finder" for the selection, and a protected-folder
@@ -129,15 +130,24 @@ Copy the Plan Paint and PlaySuite recipe exactly: pinned GUI.Forms, LLVM
 
 Gate: CI green on the pinned revisions; an installable package.
 
+## Decided
+
+Answered by the owner on 2026-10-14:
+
+- **D1 Ribbon:** a reusable ribbon control in GUI.Forms, shared with Plan
+  Paint, not a cmac composition. S6 waits on it
+  (`TOOLKIT_REQUESTS.md`).
+- **D2 Virtual mapping** means memory: swap files and the sleep image.
+  Snapshots, the container's other volumes and the residual are shown but
+  not yellow.
+- **D6 Marking folders:** no. cmac never marks folders maintain-dir-stats.
+  It reads the generation counts of folders the system marked itself.
+- **D7 Snapshot file:** yes. cmac keeps its last scan in its own cache
+  folder and rescans only what changed. It writes nothing else.
+- **D8 Repository:** public, MIT.
+
 ## Open decisions (the owner's)
 
-- **D1 Ribbon.** GUI.Forms has no ribbon control; Plan Paint builds its own
-  (`src/forms/ribbon.cpp`). Either a reusable GUI.Forms ribbon (two
-  consumers now want one), or a cmac composition of `TabControl` and
-  `CommandBar` for now.
-- **D2 Virtual mapping.** Which space is yellow besides swap and free
-  space: local snapshots, the container's other volumes, the residual, or
-  something else meant by the term.
 - **D3 Ownership lines.** Boundaries of the user and system regions, and
   the line style (shown as labelled candidates on a real scan first).
 - **D4 Red tiers.** Which of R1 to R4 in `CLASSIFICATION_STUDY.md` are red,
@@ -145,12 +155,5 @@ Gate: CI green on the pinned revisions; an installable package.
 - **D5 Clones.** Size each file by allocation (clones counted per copy, as
   Finder does) or by private size, with shared blocks shown as one
   separate tile.
-- **D6 Marking folders.** Whether cmac may, with the user's consent, mark
-  folders maintain-dir-stats through the private interface for faster
-  rescans. It writes persistent file-system metadata, contrary to the
-  read-only rule.
-- **D7 Snapshot file.** Whether cmac may keep its last scan (every name and
-  size) in its own cache folder. Needed for S2.
-- **D8 Repository.** Public or private; licence (GUI.Forms is MIT).
 - **D9 Floor.** macOS 14 or later on Apple silicon only (the GUI.Forms
   runtime contract), or Intel too.
