@@ -2,7 +2,11 @@
 // The measurement tool for stages S1 and S2 (planning/PLAN.md).
 //
 // usage: cmac-scan [--threads N] [--read-to-end] [--cross-mounts] [--top N] [--progress]
-//                  [--cache FILE [--verify]] <root>
+//                  [--walk-system] [--check-system-search] [--cache FILE [--verify]] <root>
+//
+// --walk-system reads the System volume directory by directory instead of
+// with one catalog search; --check-system-search scans both ways and
+// compares them.
 //
 // With --cache: load the saved scan in FILE if there is one, bring it up to
 // date (journal replay and an incremental scan, or a full scan when that
@@ -39,6 +43,7 @@ struct CommandLine final {
     bool show_progress{false};
     std::string cache{};
     bool verify{false};
+    bool check_system_search{false};
     bool valid{false};
 };
 
@@ -58,6 +63,10 @@ CommandLine parse_command_line(const int argc, char** const argv) {
             result.cache = argv[i];
         } else if (argument == "--verify") {
             result.verify = true;
+        } else if (argument == "--walk-system") {
+            result.options.search_system_volume = false;
+        } else if (argument == "--check-system-search") {
+            result.check_system_search = true;
         } else if (argument == "--read-to-end") {
             result.options.stop_at_entry_count = false;
         } else if (argument == "--cross-mounts") {
@@ -134,6 +143,12 @@ void print_statistics(const cmac::ScanStatistics& statistics) {
                 static_cast<unsigned long long>(statistics.directories_reused),
                 static_cast<unsigned long long>(statistics.directories_withheld));
     std::printf("walk %.3f s, build %.3f s\n", statistics.walk_seconds, statistics.build_seconds);
+    if (statistics.system_searched) {
+        std::printf("system volume searched in %.3f s, filling %llu directories\n", statistics.system_search_seconds,
+                    static_cast<unsigned long long>(statistics.directories_searched));
+    } else if (!statistics.system_search_error.empty()) {
+        std::printf("system volume search failed (%s); walked instead\n", statistics.system_search_error.c_str());
+    }
     std::printf("files %llu, directories %llu, symbolic links %llu, others %llu\n",
                 static_cast<unsigned long long>(statistics.files),
                 static_cast<unsigned long long>(statistics.directories),
@@ -198,7 +213,7 @@ struct ByPathThenSize final {
     }
 };
 
-std::vector<NodeKey> keys_of(const cmac::Snapshot& snapshot) {
+std::vector<NodeKey> keys_of(const cmac::Snapshot& snapshot, const bool presence_only) {
     std::vector<std::uint64_t> hashes(snapshot.nodes.size(), 14695981039346656037ull);
     std::vector<NodeKey> keys(snapshot.nodes.size());
     for (std::size_t n = 0; n < snapshot.nodes.size(); ++n) {
@@ -207,8 +222,12 @@ std::vector<NodeKey> keys_of(const cmac::Snapshot& snapshot) {
         hash = (hash ^ 0x2Fu) * 1099511628211ull;
         for (const char c : snapshot.name_of(node)) hash = (hash ^ static_cast<unsigned char>(c)) * 1099511628211ull;
         hashes[n] = hash;
-        const bool counted = !cmac::has_flag(node, cmac::NodeFlag::hard_link_repeat);
-        keys[n] = NodeKey{hash, counted ? node.allocated_bytes : 0, node.kind, static_cast<std::uint32_t>(n)};
+        // A file's own size, whichever of its hard links was counted: two
+        // scans may meet the links in different orders. A directory's total
+        // depends on that choice, so directories compare by kind only.
+        const bool directory = node.kind == cmac::NodeKind::directory;
+        keys[n] = NodeKey{hash, directory ? 0 : node.allocated_bytes, node.kind, static_cast<std::uint32_t>(n)};
+        if (presence_only) keys[n] = NodeKey{hash, 0, cmac::NodeKind::other, static_cast<std::uint32_t>(n)};
     }
     std::sort(keys.begin(), keys.end(), ByPathThenSize{});
     return keys;
@@ -217,9 +236,9 @@ std::vector<NodeKey> keys_of(const cmac::Snapshot& snapshot) {
 // Prints how two snapshots of the same root differ: objects only in one, and
 // objects whose size differs. A live system changes between two scans, so a
 // few differences are expected; their paths say whether they are real.
-void compare_snapshots(const cmac::Snapshot& refreshed, const cmac::Snapshot& full) {
-    const std::vector<NodeKey> a = keys_of(refreshed);
-    const std::vector<NodeKey> b = keys_of(full);
+void compare_snapshots(const cmac::Snapshot& refreshed, const cmac::Snapshot& full, const bool presence_only) {
+    const std::vector<NodeKey> a = keys_of(refreshed, presence_only);
+    const std::vector<NodeKey> b = keys_of(full, presence_only);
     std::size_t i = 0;
     std::size_t j = 0;
     std::size_t only_refreshed = 0;
@@ -235,17 +254,19 @@ void compare_snapshots(const cmac::Snapshot& refreshed, const cmac::Snapshot& fu
         }
         if (take_a) {
             only_refreshed = only_refreshed + 1;
-            if (shown < 12) {
-                std::printf("  only in refreshed: %s (%llu bytes)\n", cmac::path_of(refreshed, cmac::NodeIndex{a[i].node}).c_str(),
-                            static_cast<unsigned long long>(a[i].allocated_bytes));
+            if (shown < 40) {
+                std::printf("  only in refreshed: %s (%llu bytes, kind %d)\n",
+                            cmac::path_of(refreshed, cmac::NodeIndex{a[i].node}).c_str(),
+                            static_cast<unsigned long long>(a[i].allocated_bytes), static_cast<int>(a[i].kind));
                 shown = shown + 1;
             }
             i = i + 1;
         } else {
             only_full = only_full + 1;
-            if (shown < 12) {
-                std::printf("  only in full:      %s (%llu bytes)\n", cmac::path_of(full, cmac::NodeIndex{b[j].node}).c_str(),
-                            static_cast<unsigned long long>(b[j].allocated_bytes));
+            if (shown < 40) {
+                std::printf("  only in full:      %s (%llu bytes, kind %d)\n",
+                            cmac::path_of(full, cmac::NodeIndex{b[j].node}).c_str(),
+                            static_cast<unsigned long long>(b[j].allocated_bytes), static_cast<int>(b[j].kind));
                 shown = shown + 1;
             }
             j = j + 1;
@@ -302,7 +323,7 @@ int run_with_cache(const CommandLine& command_line) {
             std::printf("verify: the full scan failed: %s\n", full.failure.c_str());
             return 1;
         }
-        compare_snapshots(run.snapshot, full.snapshot);
+        compare_snapshots(run.snapshot, full.snapshot, false);
     }
     print_top_children(run.snapshot, command_line.top);
     return 0;
@@ -314,7 +335,7 @@ int main(const int argc, char** const argv) {
     const CommandLine command_line = parse_command_line(argc, argv);
     if (!command_line.valid) {
         std::fprintf(stderr, "usage: cmac-scan [--threads N] [--read-to-end] [--cross-mounts] [--top N] [--progress]\n"
-                             "                 [--cache FILE [--verify]] <root>\n");
+                             "                 [--walk-system] [--check-system-search] [--cache FILE [--verify]] <root>\n");
         return 64;
     }
     try {
@@ -331,6 +352,18 @@ int main(const int argc, char** const argv) {
         } else {
             ScanRun run = run_scan(scan_command.options, scan_command.show_progress);
             std::printf("outcome %s\n", run.complete ? "complete" : run.failure.c_str());
+            if (run.complete && scan_command.check_system_search) {
+                cmac::ScanOptions walked = scan_command.options;
+                walked.search_system_volume = false;
+                ScanRun reference = run_scan(walked, false);
+                std::printf("check: searched scan %.3f s walk, walked scan %.3f s walk\n", run.statistics.walk_seconds,
+                            reference.statistics.walk_seconds);
+                if (reference.complete) {
+                    compare_snapshots(run.snapshot, reference.snapshot, false);
+                    std::printf("check: by path alone\n");
+                    compare_snapshots(run.snapshot, reference.snapshot, true);
+                }
+            }
             print_statistics(run.statistics);
             if (!run.complete) {
                 status = 1;

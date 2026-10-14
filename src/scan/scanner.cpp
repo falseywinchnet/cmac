@@ -3,10 +3,13 @@
 #include "scan/directory_reader.hpp"
 #include "scan/scan_workspace.hpp"
 #include "scan/snapshot_builder.hpp"
+#include "scan/system_tree.hpp"
 
 #include "gui_forms/threading.hpp"
 
 #include <fcntl.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/syslimits.h>
@@ -54,8 +57,14 @@ struct DirectoryDescriptor final {
 };
 
 // How a job gets its directory's entries. A full scan reads every directory
-// fresh; an incremental one copies, relists or reads fresh by ReuseMark.
-enum class JobMode : std::uint8_t { fresh, relist, copy };
+// fresh, except System-volume directories, which it fills from the catalog
+// search (system_copy); an incremental one copies, relists or reads fresh by
+// ReuseMark.
+enum class JobMode : std::uint8_t { fresh, relist, copy, system_copy };
+
+// Where a System-volume search stands. Jobs needing it wait until it is
+// ready or failed (then they read their directories themselves).
+enum class SystemSearch : std::uint8_t { off, running, ready, failed };
 
 struct DirectoryJob final {
     EntryRef directory{};
@@ -67,9 +76,36 @@ struct DirectoryJob final {
     JobMode mode{JobMode::fresh};
     // This directory in the previous snapshot (relist and copy only).
     NodeIndex previous{no_node};
+    // On the sealed System volume (not reached through a firmlink).
+    bool system_volume{false};
+    // The directory's file id (system_copy only).
+    FileId id{};
     // NUL-terminated, relative to parent.
     std::array<char, job_name_capacity> name{};
 };
+
+std::string joined_path(const std::string& folder, const std::string_view name) {
+    std::string result = folder;
+    if (result.empty() || result.back() != '/') result.push_back('/');
+    result.append(name);
+    return result;
+}
+
+// Where other volumes are mounted, sorted, for directories filled from the
+// catalog search (which cannot report mount status).
+std::vector<std::string> mount_points() {
+    std::vector<std::string> result{};
+    struct statfs* mounts = nullptr;
+    const int count = getmntinfo(&mounts, MNT_NOWAIT);
+    for (int i = 0; i < count; ++i) result.emplace_back(mounts[i].f_mntonname);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+bool has_flag_bits(const std::uint16_t flags, const NodeFlag flag) {
+    const bool result = (flags & static_cast<std::uint16_t>(flag)) != 0;
+    return result;
+}
 
 struct ByFileId final {
     bool operator()(const FileId& left, const FileId& right) const { return left < right; }
@@ -152,7 +188,20 @@ struct Scan::State final {
     ScanStatistics statistics{};
     Snapshot snapshot{};
 
+    // The System volume's catalog search, written by its worker before it
+    // publishes `system_search` (under queue_mutex); read after.
+    SystemSearch system_search{SystemSearch::off};
+    // Fixed before the workers start; read freely.
+    bool system_search_enabled{false};
+    SystemTree system_tree{};
+    std::string system_search_error{};
+    std::vector<std::string> mounted{};
+    // System-volume jobs waiting for the search (under queue_mutex).
+    std::vector<DirectoryJob> deferred_jobs{};
+
     bool joined{false};
+    // The search's worker, joined before the tree it writes is destroyed.
+    std::unique_ptr<gui_forms::Worker> system_worker{};
     // Declared last: destroyed first, after the destructor has stopped and
     // joined them, so no worker outlives what it borrows.
     std::vector<std::unique_ptr<gui_forms::Worker>> workers{};
@@ -186,13 +235,15 @@ struct Scan::State final {
         std::unique_lock<std::mutex> lock(queue_mutex);
         while (true) {
             if (stopping || cancellation.requested()) return false;
+            if (jobs.empty() && !deferred_jobs.empty() && system_search != SystemSearch::running) release_deferred();
             if (!jobs.empty()) {
                 job = std::move(jobs.back());
                 jobs.pop_back();
                 active = active + 1;
                 return true;
             }
-            if (active == 0) {
+            const bool waiting_for_search = !deferred_jobs.empty();
+            if (active == 0 && !waiting_for_search) {
                 lock.unlock();
                 work_available.notify_all();
                 return false;
@@ -201,15 +252,35 @@ struct Scan::State final {
         }
     }
 
+    // Under queue_mutex, once the search has finished: its waiting jobs
+    // become ordinary jobs; if it failed they read their directories by path.
+    void release_deferred() {
+        const bool failed = system_search == SystemSearch::failed;
+        for (DirectoryJob& job : deferred_jobs) {
+            if (failed) job.mode = JobMode::fresh;
+            jobs.push_back(std::move(job));
+        }
+        deferred_jobs.clear();
+    }
+
     // Publishes the children found by one job and retires it.
     void finish_job(std::vector<DirectoryJob>& children) {
         const std::size_t pushed = children.size();
         bool drained_now = false;
         {
             const std::lock_guard<std::mutex> lock(queue_mutex);
-            for (std::size_t i = 0; i < pushed; ++i) jobs.push_back(std::move(children[i]));
+            for (std::size_t i = 0; i < pushed; ++i) {
+                DirectoryJob& child = children[i];
+                const bool waits = child.mode == JobMode::system_copy && system_search == SystemSearch::running;
+                if (child.mode == JobMode::system_copy && system_search == SystemSearch::failed) child.mode = JobMode::fresh;
+                if (waits) {
+                    deferred_jobs.push_back(std::move(child));
+                } else {
+                    jobs.push_back(std::move(child));
+                }
+            }
             active = active - 1;
-            drained_now = jobs.empty() && active == 0;
+            drained_now = jobs.empty() && active == 0 && deferred_jobs.empty();
         }
         children.clear();
         if (pushed > 1 || drained_now) {
@@ -222,6 +293,8 @@ struct Scan::State final {
     void process_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
         if (job.mode == JobMode::copy) {
             copy_job(workspace_index, job, children);
+        } else if (job.mode == JobMode::system_copy) {
+            system_copy_job(workspace_index, job, children);
         } else {
             read_job(workspace_index, job, children);
         }
@@ -327,6 +400,79 @@ struct Scan::State final {
         progress.allocated_bytes.fetch_add(allocated, std::memory_order_relaxed);
     }
 
+    bool is_mount_point(const std::string& path) const {
+        const bool result = std::binary_search(mounted.begin(), mounted.end(), path);
+        return result;
+    }
+
+    // Fills a System-volume directory from the catalog search: no system
+    // call. Firmlinks are handed to the walk by absolute path (their contents
+    // are on the Data volume); mount points are not entered.
+    void system_copy_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
+        Workspace& workspace = workspaces[workspace_index];
+        const std::span<const SystemEntry> found = system_tree.children_of(job.id);
+        job.parent.reset();
+        Listing listing{};
+        listing.directory = job.directory;
+        listing.first_entry = static_cast<std::uint32_t>(workspace.entries.size());
+        listing.entry_count = static_cast<std::uint32_t>(found.size());
+        listing.state = DirectoryState::listed;
+        std::uint64_t allocated = 0;
+        for (const SystemEntry& item : found) {
+            const std::string_view name = system_tree.name_of(item);
+            ScanEntry entry{};
+            entry.kind = item.kind;
+            entry.file_id = item.id;
+            entry.link_count = item.link_count;
+            entry.allocated_bytes = item.allocated_bytes;
+            entry.logical_bytes = item.logical_bytes;
+            std::uint16_t flags = 0;
+            if ((item.bsd_flags & UF_COMPRESSED) != 0) flags |= static_cast<std::uint16_t>(NodeFlag::compressed);
+            if ((item.bsd_flags & SF_DATALESS) != 0) flags |= static_cast<std::uint16_t>(NodeFlag::dataless);
+            const bool firmlink = (item.bsd_flags & SF_FIRMLINK) != 0;
+            if (firmlink) flags |= static_cast<std::uint16_t>(NodeFlag::firmlink);
+            entry.flags = flags;
+            if (item.kind == NodeKind::directory) entry.directory_state = DirectoryState::failed;
+            allocated += item.allocated_bytes;
+            const std::size_t offset = workspace.names.size();
+            workspace.names.insert(workspace.names.end(), name.begin(), name.end());
+            entry.name.offset = static_cast<std::uint32_t>(offset);
+            entry.name.length = static_cast<std::uint32_t>(name.size());
+            std::string path{};
+            bool queue_child = false;
+            if (item.kind == NodeKind::directory) {
+                path = joined_path(job.path, name);
+                const bool mounted_here = is_mount_point(path);
+                if (mounted_here && options.prune_mount_points) {
+                    entry.directory_state = DirectoryState::mount_point;
+                } else if (!firmlink && withheld(item.id)) {
+                    entry.directory_state = DirectoryState::refused;
+                    workspace.directories_withheld = workspace.directories_withheld + 1;
+                } else {
+                    queue_child = name.size() < job_name_capacity;
+                }
+            }
+            const std::uint32_t entry_index = static_cast<std::uint32_t>(workspace.entries.size());
+            workspace.entries.push_back(entry);
+            if (!queue_child) continue;
+            const bool stays_on_system = !firmlink && !is_mount_point(path);
+            children.emplace_back();
+            DirectoryJob& next = children.back();
+            next.directory = EntryRef{workspace_index, entry_index};
+            next.mode = stays_on_system ? JobMode::system_copy : JobMode::fresh;
+            next.system_volume = stays_on_system;
+            next.id = item.id;
+            next.path = path;
+            std::memcpy(next.name.data(), name.data(), name.size());
+            next.name[name.size()] = '\0';
+        }
+        workspace.listings.push_back(listing);
+        workspace.directories_searched = workspace.directories_searched + 1;
+        progress.directories_read.fetch_add(1, std::memory_order_relaxed);
+        progress.entries_seen.fetch_add(found.size(), std::memory_order_relaxed);
+        progress.allocated_bytes.fetch_add(allocated, std::memory_order_relaxed);
+    }
+
     // Opens and lists one directory from disk; queues its subdirectories.
     void read_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
         Workspace& workspace = workspaces[workspace_index];
@@ -383,13 +529,21 @@ struct Scan::State final {
             if (matching) previous_child = match_previous(workspace, name, entry.file_id);
             JobMode mode = JobMode::fresh;
             if (previous_child != no_node) mode = mode_for(options.marks[previous_child.value]);
+            // A System-volume directory (not a firmlink) is filled from the
+            // catalog search when one runs.
+            const bool firmlink = has_flag_bits(entry.flags, NodeFlag::firmlink);
+            const bool system_child = job.system_volume && !firmlink;
+            if (system_child && system_search_enabled && mode == JobMode::fresh) mode = JobMode::system_copy;
             children.emplace_back();
             DirectoryJob& child = children.back();
             child.directory = EntryRef{workspace_index, entry_index};
             child.mode = mode;
-            child.previous = mode == JobMode::fresh ? no_node : previous_child;
+            child.previous = mode == JobMode::fresh || mode == JobMode::system_copy ? no_node : previous_child;
+            child.system_volume = system_child;
+            child.id = entry.file_id;
+            if (mode == JobMode::system_copy) child.path = joined_path(job.path, name);
             // A copied directory is never opened, so it need not hold this one open.
-            if (mode != JobMode::copy) child.parent = directory;
+            if (mode != JobMode::copy && mode != JobMode::system_copy) child.parent = directory;
             child.expected_entries = entry.expected_entries;
             std::memcpy(child.name.data(), name.data(), name.size());
             child.name[name.size()] = '\0';
@@ -409,6 +563,7 @@ struct Scan::State final {
         {
             const std::lock_guard<std::mutex> lock(queue_mutex);
             jobs.clear();
+            deferred_jobs.clear();
         }
         bool failed = false;
         {
@@ -422,8 +577,17 @@ struct Scan::State final {
             statistics.directories_listed += workspace.directories_listed;
             statistics.directories_reused += workspace.directories_reused;
             statistics.directories_withheld += workspace.directories_withheld;
+            statistics.directories_searched += workspace.directories_searched;
         }
         statistics.walk_seconds = seconds_between(started, walked);
+        {
+            // The search may still be running if no System directory waited
+            // for it; its fields are read only under the lock, once published.
+            const std::lock_guard<std::mutex> lock(queue_mutex);
+            statistics.system_searched = system_search == SystemSearch::ready;
+            statistics.system_search_error = system_search_error;
+            if (statistics.system_searched) statistics.system_search_seconds = system_tree.seconds;
+        }
         if (failed) {
             outcome = ScanOutcome::failed;
         } else if (cancel_requested.load(std::memory_order_relaxed)) {
@@ -442,6 +606,28 @@ struct Scan::State final {
             statistics.build_seconds = seconds_between(walked, built);
         }
         finished.store(true, std::memory_order_release);
+    }
+
+    // The System volume's catalog search, on its own worker beside the walk.
+    // Publishes the tree under queue_mutex and wakes the walkers waiting
+    // for it.
+    static void run_system_search(const gui_forms::CancellationFlag& cancellation, void* const address) {
+        State& state = *static_cast<State*>(address);
+        SystemTree tree{};
+        std::string error{};
+        bool ok = false;
+        try {
+            ok = read_system_tree("/", cancellation, tree, error);
+        } catch (const std::exception& failure) {
+            error = failure.what();
+        }
+        {
+            const std::lock_guard<std::mutex> lock(state.queue_mutex);
+            if (ok) state.system_tree = std::move(tree);
+            state.system_search_error = error;
+            state.system_search = ok ? SystemSearch::ready : SystemSearch::failed;
+        }
+        state.work_available.notify_all();
     }
 
     static void run_worker(const gui_forms::CancellationFlag& cancellation, void* const address) {
@@ -493,6 +679,12 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
         root_job.mode = mode_for(state.options.marks[root_node.value]);
         root_job.previous = root_job.mode == JobMode::fresh ? no_node : root_node;
     }
+    root_job.path = state.options.root;
+    state.mounted = mount_points();
+    const bool full_scan_of_root = !state.options.previous && state.options.root == "/";
+    state.system_search_enabled =
+        state.options.search_system_volume && full_scan_of_root && sealed_and_searchable("/");
+    root_job.system_volume = state.system_search_enabled;
     state.jobs.push_back(std::move(root_job));
 
     const std::uint32_t thread_count = state.options.thread_count;
@@ -508,6 +700,10 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
     }
     state.workers.reserve(thread_count);
     state.started = std::chrono::steady_clock::now();
+    if (state.system_search_enabled) {
+        state.system_search = SystemSearch::running;
+        state.system_worker = std::make_unique<gui_forms::Worker>(State::run_system_search, &state);
+    }
     try {
         for (std::uint32_t w = 0; w < thread_count; ++w) {
             state.workers.push_back(std::make_unique<gui_forms::Worker>(State::run_worker, &state.contexts[w]));
@@ -518,6 +714,10 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
         state.stop_all();
         for (std::unique_ptr<gui_forms::Worker>& worker : state.workers) (*worker).join();
         state.workers.clear();
+        if (state.system_worker) {
+            (*state.system_worker).request_cancel();
+            (*state.system_worker).join();
+        }
         throw;
     }
 }
@@ -542,6 +742,7 @@ void Scan::request_cancel() noexcept {
     if (state.finished.load(std::memory_order_acquire)) return;
     state.cancel_requested.store(true, std::memory_order_relaxed);
     for (std::unique_ptr<gui_forms::Worker>& worker : state.workers) (*worker).request_cancel();
+    if (state.system_worker) (*state.system_worker).request_cancel();
     state.stop_all();
 }
 
@@ -549,6 +750,7 @@ void Scan::wait() {
     State& state = *state_;
     if (state.joined) return;
     for (std::unique_ptr<gui_forms::Worker>& worker : state.workers) (*worker).join();
+    if (state.system_worker) (*state.system_worker).join();
     state.joined = true;
 }
 

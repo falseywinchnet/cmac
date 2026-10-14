@@ -58,6 +58,9 @@ enum class NodeFlag : std::uint16_t {
     hard_link_repeat = 1u << 5,
     // The kernel returned an error for this entry; its sizes are unknown.
     attributes_failed = 1u << 6,
+    // SF_FIRMLINK: a System-volume stub whose contents are a Data-volume
+    // folder (/Users, /Applications, /System/Library/Caches, ...).
+    firmlink = 1u << 7,
 };
 
 // A name in Snapshot::names: UTF-8 bytes, not terminated.

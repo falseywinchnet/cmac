@@ -42,7 +42,8 @@ add_library(cmac_scan STATIC
     src/scan/scanner.cpp
     src/scan/snapshot.cpp
     src/scan/snapshot_builder.cpp
-    src/scan/snapshot_file.cpp)
+    src/scan/snapshot_file.cpp
+    src/scan/system_tree.cpp)
 target_include_directories(cmac_scan PUBLIC src)
 target_compile_features(cmac_scan PUBLIC cxx_std_20)
 target_compile_options(cmac_scan PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)

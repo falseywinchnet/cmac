@@ -331,6 +331,50 @@ two snapshots in memory during a refresh (peak resident 632 MiB on the M4).
 No cold-cache or after-reboot launch has been measured; the journal and the
 record both survive a reboot.
 
+## 6c. The sealed System volume by catalog search (2026-10-14)
+
+The System volume is sealed: nothing changes during a search, so searchfs
+never restarts (`EBUSY`, which ruled it out for Data). It also costs far
+less kernel time there than the walk. Measured on the M4:
+
+| | Wall | Kernel CPU |
+|---|---|---|
+| searchfs, System volume alone | 3.2 s | 1.2 s |
+| walk, System volume alone (8 threads) | 3.9 s | 23.7 s |
+| walk, Data volume alone (8 threads) | 5.5 s | 20.0 s |
+| searchfs System and walk Data at once | 5.7 s | — |
+
+cmac now fills System-volume directories from one search on its own worker
+while the walkers read the Data volume (`src/scan/system_tree.hpp`).
+Firmlink stubs (`SF_FIRMLINK`, 17 of them, matching `/usr/share/firmlinks`)
+are handed to the walk by absolute path; mount points come from
+`getmntinfo`; if the search fails, the waiting directories are read
+normally.
+
+| First scan of `/` | Walked | System searched |
+|---|---|---|
+| M4 (10 CPUs) | 9.5 to 9.8 s | **6.6 to 6.8 s** |
+| owner's MacBook (6 CPUs, loaded) | 12.2 to 15.0 s | **9.5 to 9.8 s** |
+
+`cmac-scan / --check-system-search` scans both ways and compares node by
+node. After the two fixes below, both machines agree to the object
+(1,990,015 on the M4, every path present in both, the same kinds), apart
+from 0 to 3 nodes on the M4 and about 10 on the MacBook that a live system
+changed between the two scans.
+
+Two quirks found on the way:
+
+- **Hard links repeated.** A search resumed after `EAGAIN` sometimes returns
+  a hard-linked file's links a second time: in one run of two,
+  `_CodeSignature/CodeResources` (one file, 5,795 links) appeared twice in
+  every folder. Exact repeats (same parent, id and name) are now dropped.
+- **Symbolic links reported as files.** searchfs gives `VREG` for a symbolic
+  link on APFS, and neither `ATTR_CMN_ACCESSMASK` (`EINVAL`) nor the Finder
+  type tells them apart. A symbolic link keeps its target inline (no
+  allocation, nonzero length); a regular file looks like that only when
+  compressed or dataless, both flagged. That rule matched every kind the
+  walk reported.
+
 ## 7. How to repeat
 
 ```sh

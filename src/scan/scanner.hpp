@@ -44,6 +44,11 @@ struct ScanOptions final {
     // without Full Disk Access, opening them would stop the scan on a
     // macOS consent prompt. They are recorded as refused, size unknown.
     std::vector<FileId> withheld{};
+    // For a full scan of "/": read the sealed System volume with one
+    // catalog search beside the walk (src/scan/system_tree.hpp). Ignored for
+    // other roots, for incremental scans, and when the volume does not
+    // support it.
+    bool search_system_volume{true};
 };
 
 // Updated by the workers once per directory with relaxed order; for
@@ -70,6 +75,12 @@ struct ScanStatistics final {
     std::uint64_t directories_reused{0};
     // Protected directories left unopened (ScanOptions::withheld).
     std::uint64_t directories_withheld{0};
+    // Directories filled from the System volume's catalog search, and that
+    // search's outcome and time.
+    std::uint64_t directories_searched{0};
+    bool system_searched{false};
+    double system_search_seconds{0.0};
+    std::string system_search_error{};
     std::uint32_t thread_count{0};
     std::uint32_t peak_open_descriptors{0};
     // From the first worker's start to the last worker draining the queue,

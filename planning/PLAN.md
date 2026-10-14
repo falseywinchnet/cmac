@@ -48,7 +48,9 @@ and timings. No window yet.
 - Cancellation checked between directories. Progress as atomic counters.
 - The finished tree published as an immutable snapshot.
 
-Gate record so far (2026-10-14, `SCANNER_STUDY.md` §6a):
+Gate record so far (2026-10-14, `SCANNER_STUDY.md` §6a and §6c; first scans
+now search the sealed System volume beside the Data walk, 9.7 s to 6.7 s on
+the M4):
 - done: built with LLVM 22.1.8 on the M4; fixture tests pass (hard links
   once, a clone, a sparse file, a symbolic link loop, a refused folder, a
   5,000-entry folder, a 300-deep chain, one against many threads, read to

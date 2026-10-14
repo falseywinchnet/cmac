@@ -115,6 +115,7 @@ std::uint16_t flags_of(const std::uint32_t bsd_flags, const std::uint64_t extend
     if ((extended_flags & EF_MAY_SHARE_BLOCKS) != 0) result |= static_cast<std::uint16_t>(NodeFlag::may_share_blocks);
     if ((bsd_flags & SF_DATALESS) != 0) result |= static_cast<std::uint16_t>(NodeFlag::dataless);
     if ((bsd_flags & UF_COMPRESSED) != 0) result |= static_cast<std::uint16_t>(NodeFlag::compressed);
+    if ((bsd_flags & SF_FIRMLINK) != 0) result |= static_cast<std::uint16_t>(NodeFlag::firmlink);
     return result;
 }
 
