@@ -32,5 +32,6 @@ Both are pinned by revision; see `planning/PLAN.md`.
 
 ## Status
 
-Planning. Stage S0 (guardrails and measurements) is recorded; the scanner
-(S1) is next. `planning/PLAN.md` is the programme.
+A basic window works: the scanner (S1) and a first treemap (S5) on the M4;
+see `evidence/2026-10-14-first-treemap/`. `planning/PLAN.md` is the
+programme and records what is measured and what is open.

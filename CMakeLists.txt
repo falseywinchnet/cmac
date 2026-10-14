@@ -20,13 +20,16 @@ if(NOT _cmac_gui_forms_git EQUAL 0 OR NOT _cmac_gui_forms_head STREQUAL CMAC_GUI
                         "${CMAC_GUI_FORMS_REVISION}; run tools/fetch_dependencies.sh")
 endif()
 
-# Stage S1 needs only GUIForms::Threading. The host, Skia and the text
-# engine are switched on in stage S6, with the application.
+# The window needs GUI.Forms' macOS host, its CPU Skia renderer and the text
+# engine (pass GUI_FORMS_SKIA_PREBUILT and GUI_FORMS_SKIA_OUT, as PlaySuite
+# does). Without it only the scanner, cmac-scan and their tests are built,
+# and GUI.Forms contributes only GUIForms::Threading.
+option(CMAC_BUILD_APPLICATION "Build the cmac window" ON)
 set(GUI_FORMS_BUILD_GALLERY OFF CACHE BOOL "" FORCE)
 set(GUI_FORMS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GUI_FORMS_ENABLE_SKIA OFF CACHE BOOL "" FORCE)
-set(GUI_FORMS_ENABLE_MACOS_HOST OFF CACHE BOOL "" FORCE)
-set(GUI_FORMS_ENABLE_HARFBUZZ_TEXT OFF CACHE BOOL "" FORCE)
+set(GUI_FORMS_ENABLE_SKIA ${CMAC_BUILD_APPLICATION} CACHE BOOL "" FORCE)
+set(GUI_FORMS_ENABLE_MACOS_HOST ${CMAC_BUILD_APPLICATION} CACHE BOOL "" FORCE)
+set(GUI_FORMS_ENABLE_HARFBUZZ_TEXT ${CMAC_BUILD_APPLICATION} CACHE BOOL "" FORCE)
 add_subdirectory("${CMAC_GUI_FORMS_SOURCE_DIR}" gui_forms EXCLUDE_FROM_ALL)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -47,6 +50,51 @@ target_compile_options(cmac-scan PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(cmac-scan PRIVATE cmac_scan)
 
 include(CTest)
+
+if(CMAC_BUILD_APPLICATION)
+    set(CMAC_GAMES_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.build/deps/games"
+        CACHE PATH "Pinned games repository, for its render engine (tools/fetch_dependencies.sh)")
+    set(ENGINE_DIR "${CMAC_GAMES_SOURCE_DIR}/shared/render")
+    if(NOT EXISTS "${ENGINE_DIR}/build.cmake")
+        message(FATAL_ERROR "The render engine is not at ${ENGINE_DIR}; run tools/fetch_dependencies.sh")
+    endif()
+    # The engine's own build: render_core, render_ui, and its render_engine test.
+    include("${ENGINE_DIR}/build.cmake")
+
+    add_library(cmac_treemap STATIC
+        src/space/container_space.cpp
+        src/treemap/cushion_painter.cpp
+        src/treemap/treemap.cpp)
+    target_include_directories(cmac_treemap PUBLIC src)
+    target_compile_options(cmac_treemap PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+    target_link_libraries(cmac_treemap PUBLIC cmac_scan render_core)
+
+    add_executable(cmac MACOSX_BUNDLE
+        src/app/main.cpp
+        src/app/main_window.cpp
+        src/app/treemap_view.cpp
+        src/platform/macos/show_in_finder.cpp
+        "${ENGINE_DIR}/ui/surface.cpp")
+    target_compile_options(cmac PRIVATE -Wall -Wextra)
+    target_link_libraries(cmac PRIVATE cmac_treemap render_ui GUIForms::Application)
+    set_target_properties(cmac PROPERTIES
+        MACOSX_BUNDLE_BUNDLE_NAME "cmac"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.falseywinchnet.cmac"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}")
+    # GUI.Forms draws only its bundled faces, read from Resources/fonts.
+    add_custom_command(TARGET cmac POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAC_GUI_FORMS_SOURCE_DIR}/assets/fonts"
+                "$<TARGET_BUNDLE_CONTENT_DIR:cmac>/Resources/fonts")
+
+    if(BUILD_TESTING)
+        add_executable(cmac_treemap_tests tests/treemap_tests.cpp)
+        target_compile_options(cmac_treemap_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(cmac_treemap_tests PRIVATE cmac_treemap)
+        add_test(NAME cmac_treemap_tests COMMAND cmac_treemap_tests)
+    endif()
+endif()
+
 if(BUILD_TESTING)
     add_executable(cmac_scan_tests tests/scan_tests.cpp)
     target_compile_options(cmac_scan_tests PRIVATE -Wall -Wextra -Wpedantic)

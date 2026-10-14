@@ -9,7 +9,7 @@ assume them.
 
 | Dependency | Repository | Revision | Use |
 |---|---|---|---|
-| GUI.Forms | `falseywinchnet/gui_forms` | `a0739e4c86a19afb1493b8e31e3b1392edfddd0b` (main, 2026-10-14) | window, controls, threading, live surfaces; LLVM 22.1.8 contract |
+| GUI.Forms | `falseywinchnet/gui_forms` | `6fd0071a0f25a8d4d13661dfe61d1c93c5552e00` (PlaySuite's pin; the same code as main on 2026-10-14) | window, controls, threading, live surfaces; LLVM 22.1.8 contract |
 | Render engine | `falseywinchnet/games`, `shared/render` | `7e2a21e8d948d58ec30be7a952e6ee051c0936f4` (main, 2026-10-14) | `render_core` (`Target`, `Rect`, `r2d`) and `ui/surface` |
 
 Validate a new pin before adopting it (build, tests, one scan, one frame).
@@ -131,6 +131,15 @@ Depends on S1.
 Gate: full repaint time at 2560 × 1600 device pixels for the S1 snapshot of
 `/`, and the repaint area of a selection change, measured on the M4.
 
+Progress (2026-10-14, `evidence/2026-10-14-first-treemap/`): a basic window
+works on the M4: the header (status, selection, Show in Finder) above the
+treemap. 2.01 M objects scanned in 9.6 s, laid out as 742 k tiles in 34 ms
+and painted in 5 ms at 1280 × 724 (scale 1); free space, virtual memory and
+the red tiers drawn. Selection, parent selection, double-click and Return
+to show in Finder are written but were not exercised by a test or by hand.
+Open: the 2560 × 1600 measurement, the selection repaint area, banded
+painting, and a layout that is not redone on every resize step.
+
 ### S6. Application
 
 Depends on S3, S4, S5 and the GUI.Forms ribbon (D1).
@@ -138,6 +147,12 @@ Depends on S3, S4, S5 and the GUI.Forms ribbon (D1).
 The GUI.Forms window: ribbon, folder list synchronized with the treemap,
 status line, "Show in Finder" for the selection, and a protected-folder
 notice that explains Full Disk Access.
+
+Found 2026-10-14: launched as an app without Full Disk Access, the scan
+stops in `openat` at the first privacy-protected folder (Desktop,
+Documents, Downloads, …) until the user answers macOS's consent prompt; every
+worker can end up waiting on one. The window must say so while it waits,
+and offer the Full Disk Access route before scanning.
 
 Gate: an M4 smoke run (launch, scan, select, show in Finder, close), and
 layouts checked at the window minimum and at scales 1 and 2.
