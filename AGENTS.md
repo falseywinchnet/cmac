@@ -77,6 +77,10 @@ need review against the full document.
   order, and the UI thread collects it on its timer with acquire order.
   Progress is read from atomic counters the same way. Nothing on a worker
   touches a control.
+- One foreign exception: FSEvents delivers journal events on a serial
+  dispatch queue it owns for the stream. The callback there only appends to
+  a mutex-guarded record; no cmac work runs on it, and the replay drains the
+  queue before returning (`src/platform/macos/change_journal.cpp`).
 - Declare a `Worker` after the context it borrows, so it is joined first.
   Cancellation is checked between directories, never inside the entry loop.
 - A finished scan is published as an immutable snapshot. A rescan builds a

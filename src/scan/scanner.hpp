@@ -10,8 +10,21 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace cmac {
+
+// What an incremental scan does with each directory of the previous
+// snapshot (one mark per previous node; only directories' marks are read).
+enum class ReuseMark : std::uint8_t {
+    // Copy its listing from the previous snapshot without a system call.
+    reuse,
+    // Read it again; subdirectories found in the previous snapshot (same name
+    // and file id) keep their own marks.
+    relist,
+    // Read it and everything below it again.
+    rescan,
+};
 
 struct ScanOptions final {
     // An absolute path to a directory. "/" scans the volume group (System
@@ -22,6 +35,11 @@ struct ScanOptions final {
     bool stop_at_entry_count{true};
     // Do not cross into other mounted volumes or automount triggers.
     bool prune_mount_points{true};
+    // An incremental scan: a previous snapshot of the same root, shared so it
+    // outlives the scan, and one mark per previous node (plan_reuse). Empty
+    // for a full scan.
+    std::shared_ptr<const Snapshot> previous{};
+    std::vector<ReuseMark> marks{};
 };
 
 // Updated by the workers once per directory with relaxed order; for
@@ -43,6 +61,9 @@ struct ScanStatistics final {
     std::uint64_t hard_link_repeats{0};
     std::uint64_t entries_with_errors{0};
     std::uint64_t bulk_calls{0};
+    // Directories listed from disk, and copied from the previous snapshot.
+    std::uint64_t directories_listed{0};
+    std::uint64_t directories_reused{0};
     std::uint32_t thread_count{0};
     std::uint32_t peak_open_descriptors{0};
     // From the first worker's start to the last worker draining the queue,
@@ -57,9 +78,9 @@ class Scan final {
 public:
     // Opens the root and starts the workers. Throws std::system_error when
     // the root cannot be opened as a directory, and std::invalid_argument
-    // for an empty root. Raises the process's descriptor soft limit to its
-    // hard limit (at most OPEN_MAX), since open parents are held while
-    // their children are opened.
+    // for an empty root or marks that do not match the previous snapshot.
+    // Raises the process's descriptor soft limit to its hard limit (at most
+    // OPEN_MAX), since open parents are held while their children are opened.
     explicit Scan(ScanOptions options);
     // Requests cancellation and joins the workers.
     ~Scan();

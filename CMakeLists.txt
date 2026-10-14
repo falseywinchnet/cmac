@@ -38,16 +38,26 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(cmac_scan STATIC
     src/scan/directory_reader.cpp
+    src/scan/reuse_plan.cpp
     src/scan/scanner.cpp
-    src/scan/snapshot_builder.cpp)
+    src/scan/snapshot.cpp
+    src/scan/snapshot_builder.cpp
+    src/scan/snapshot_file.cpp)
 target_include_directories(cmac_scan PUBLIC src)
 target_compile_features(cmac_scan PUBLIC cxx_std_20)
 target_compile_options(cmac_scan PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 target_link_libraries(cmac_scan PUBLIC GUIForms::Threading)
 
+# The change journal (FSEvents) and the refresh decision built on it.
+add_library(cmac_refresh STATIC
+    src/platform/macos/change_journal.cpp
+    src/refresh/refresh.cpp)
+target_compile_options(cmac_refresh PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(cmac_refresh PUBLIC cmac_scan "-framework CoreServices")
+
 add_executable(cmac-scan src/tools/cmac_scan.cpp)
 target_compile_options(cmac-scan PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(cmac-scan PRIVATE cmac_scan)
+target_link_libraries(cmac-scan PRIVATE cmac_refresh)
 
 include(CTest)
 
@@ -76,7 +86,7 @@ if(CMAC_BUILD_APPLICATION)
         src/platform/macos/show_in_finder.cpp
         "${ENGINE_DIR}/ui/surface.cpp")
     target_compile_options(cmac PRIVATE -Wall -Wextra)
-    target_link_libraries(cmac PRIVATE cmac_treemap render_ui GUIForms::Application)
+    target_link_libraries(cmac PRIVATE cmac_treemap cmac_refresh render_ui GUIForms::Application)
     set_target_properties(cmac PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "cmac"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.falseywinchnet.cmac"
@@ -101,6 +111,11 @@ if(BUILD_TESTING)
     target_link_libraries(cmac_scan_tests PRIVATE cmac_scan)
     add_test(NAME cmac_scan_tests COMMAND cmac_scan_tests)
     set_tests_properties(cmac_scan_tests PROPERTIES TIMEOUT 120)
+    add_executable(cmac_refresh_tests tests/refresh_tests.cpp)
+    target_compile_options(cmac_refresh_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(cmac_refresh_tests PRIVATE cmac_refresh)
+    add_test(NAME cmac_refresh_tests COMMAND cmac_refresh_tests)
+    set_tests_properties(cmac_refresh_tests PROPERTIES TIMEOUT 120)
     add_test(NAME cmac_house_style
              COMMAND python3 -B "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_house_style.py"
                      "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests")

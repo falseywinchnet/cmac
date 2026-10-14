@@ -88,6 +88,16 @@ Depends on S1.
 Gate: time from launch to a complete, current picture on the second launch,
 and zero misses against a full walk after a scripted churn fixture.
 
+Gate record so far (2026-10-14, `SCANNER_STUDY.md` §8): the second launch
+on the M4 reaches a complete, current picture in 0.71 s (10.3 s with no
+record); `cmac_refresh_tests` passes (record round trip, damaged records
+rejected, an incremental scan after adds, removals, growth, a new tree and a
+removed tree equal to a full scan, and the journal reporting the changed
+folders). Open: the sealed System volume is copied like any other unchanged
+folder, but a system update forces a full scan rather than rescanning only
+System; open writers (libproc) are not yet consulted; after-reboot and cold
+launches are not measured.
+
 ### S3. Space accounting (the yellow)
 
 Depends on S1.

@@ -92,7 +92,4 @@ struct TreemapLayout final {
 void lay_out_treemap(const Snapshot& snapshot, const ContainerSpace& space, int width, int height,
                      const TreemapParameters& parameters, TreemapLayout& layout);
 
-// The node's absolute path ("/Users/me/file"), built from its ancestors.
-[[nodiscard]] std::string path_of(const Snapshot& snapshot, NodeIndex node);
-
 } // namespace cmac

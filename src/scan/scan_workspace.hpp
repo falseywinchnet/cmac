@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace cmac {
@@ -51,6 +52,13 @@ struct Listing final {
     DirectoryState state{DirectoryState::failed};
 };
 
+// A previous snapshot's child, for matching a relisted directory's entries
+// by name.
+struct PreviousChild final {
+    std::string_view name{};
+    NodeIndex node{};
+};
+
 struct Workspace final {
     std::vector<ScanEntry> entries{};
     std::vector<char> names{};
@@ -59,6 +67,10 @@ struct Workspace final {
     // measured probe's size, SCANNER_STUDY.md §2).
     std::vector<std::byte> attribute_buffer{};
     std::uint64_t bulk_calls{0};
+    std::uint64_t directories_listed{0};
+    std::uint64_t directories_reused{0};
+    // Scratch for matching one relisted directory's children; reused.
+    std::vector<PreviousChild> previous_children{};
 };
 
 } // namespace cmac

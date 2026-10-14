@@ -12,6 +12,7 @@
 #include <sys/syslimits.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <string_view>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -51,13 +53,33 @@ struct DirectoryDescriptor final {
     std::atomic<std::uint32_t>* open_descriptors{nullptr};
 };
 
+// How a job gets its directory's entries. A full scan reads every directory
+// fresh; an incremental one copies, relists or reads fresh by ReuseMark.
+enum class JobMode : std::uint8_t { fresh, relist, copy };
+
 struct DirectoryJob final {
     EntryRef directory{};
+    // The open parent; empty when the parent was copied rather than opened,
+    // and then `path` names this directory absolutely.
     std::shared_ptr<DirectoryDescriptor> parent{};
+    std::string path{};
     std::uint32_t expected_entries{UINT32_MAX};
+    JobMode mode{JobMode::fresh};
+    // This directory in the previous snapshot (relist and copy only).
+    NodeIndex previous{no_node};
     // NUL-terminated, relative to parent.
     std::array<char, job_name_capacity> name{};
 };
+
+struct ByName final {
+    bool operator()(const PreviousChild& left, const PreviousChild& right) const { return left.name < right.name; }
+};
+
+JobMode mode_for(const ReuseMark mark) {
+    if (mark == ReuseMark::reuse) return JobMode::copy;
+    if (mark == ReuseMark::relist) return JobMode::relist;
+    return JobMode::fresh;
+}
 
 std::uint32_t logical_cpu_count() {
     int count = 0;
@@ -193,12 +215,112 @@ struct Scan::State final {
         }
     }
 
-    // Opens and lists one directory; queues its subdirectories in children.
     void process_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
+        if (job.mode == JobMode::copy) {
+            copy_job(workspace_index, job, children);
+        } else {
+            read_job(workspace_index, job, children);
+        }
+    }
+
+    // Fills the workspace's scratch with a previous directory's children,
+    // sorted by name.
+    void gather_previous_children(Workspace& workspace, const NodeIndex directory) const {
+        const Snapshot& previous = *options.previous;
+        const Node& node = previous.nodes[directory.value];
+        workspace.previous_children.clear();
+        for (std::uint32_t k = 0; k < node.child_count; ++k) {
+            const NodeIndex child{node.first_child.value + k};
+            const std::string_view name = previous.name_of(previous.nodes[child.value]);
+            workspace.previous_children.push_back(PreviousChild{name, child});
+        }
+        std::sort(workspace.previous_children.begin(), workspace.previous_children.end(), ByName{});
+    }
+
+    // The previous snapshot's directory with this name and file id, or
+    // no_node.
+    NodeIndex match_previous(const Workspace& workspace, const std::string_view name, const FileId file_id) const {
+        const PreviousChild probe{name, no_node};
+        const std::vector<PreviousChild>::const_iterator found = std::lower_bound(
+            workspace.previous_children.begin(), workspace.previous_children.end(), probe, ByName{});
+        if (found == workspace.previous_children.end() || (*found).name != name) return no_node;
+        const Node& node = (*options.previous).nodes[(*found).node.value];
+        if (node.kind != NodeKind::directory || node.file_id != file_id) return no_node;
+        return (*found).node;
+    }
+
+    // Copies a directory's listing from the previous snapshot: no system
+    // call. Its subdirectories are queued by their own marks; any that must
+    // be read are opened by absolute path, since this one was not opened.
+    void copy_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
         Workspace& workspace = workspaces[workspace_index];
-        const int parent_descriptor = (*job.parent).descriptor;
-        const int descriptor = ::openat(parent_descriptor, job.name.data(),
-                                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        const Snapshot& previous = *options.previous;
+        const Node& directory = previous.nodes[job.previous.value];
+        job.parent.reset();
+        Listing listing{};
+        listing.directory = job.directory;
+        listing.first_entry = static_cast<std::uint32_t>(workspace.entries.size());
+        listing.entry_count = directory.child_count;
+        listing.state = directory.directory_state;
+        std::uint64_t allocated = 0;
+        for (std::uint32_t k = 0; k < directory.child_count; ++k) {
+            const NodeIndex child_index{directory.first_child.value + k};
+            const Node& child = previous.nodes[child_index.value];
+            const std::string_view name = previous.name_of(child);
+            ScanEntry entry{};
+            entry.allocated_bytes = child.allocated_bytes;
+            entry.logical_bytes = child.logical_bytes;
+            entry.file_id = child.file_id;
+            entry.link_count = child.link_count;
+            // The builder decides hard-link repeats again for the new tree.
+            entry.flags = static_cast<std::uint16_t>(child.flags & ~static_cast<std::uint16_t>(NodeFlag::hard_link_repeat));
+            entry.kind = child.kind;
+            entry.directory_state = child.directory_state;
+            if (child.kind == NodeKind::directory) {
+                const bool mounted = child.directory_state == DirectoryState::mount_point;
+                entry.directory_state = mounted ? DirectoryState::mount_point : DirectoryState::failed;
+                // A snapshot directory's sizes are its subtree's totals; as an
+                // entry it has none of its own, as a fresh read reports.
+                entry.allocated_bytes = 0;
+                entry.logical_bytes = 0;
+            } else {
+                allocated += child.allocated_bytes;
+            }
+            const std::size_t offset = workspace.names.size();
+            workspace.names.insert(workspace.names.end(), name.begin(), name.end());
+            entry.name.offset = static_cast<std::uint32_t>(offset);
+            entry.name.length = static_cast<std::uint32_t>(name.size());
+            const std::uint32_t entry_index = static_cast<std::uint32_t>(workspace.entries.size());
+            workspace.entries.push_back(entry);
+            if (entry.kind != NodeKind::directory || entry.directory_state != DirectoryState::failed) continue;
+            if (name.size() >= job_name_capacity) continue;
+            const JobMode mode = mode_for(options.marks[child_index.value]);
+            children.emplace_back();
+            DirectoryJob& next = children.back();
+            next.directory = EntryRef{workspace_index, entry_index};
+            next.mode = mode;
+            next.previous = mode == JobMode::fresh ? no_node : child_index;
+            if (mode != JobMode::copy) next.path = path_of(previous, child_index);
+            std::memcpy(next.name.data(), name.data(), name.size());
+            next.name[name.size()] = '\0';
+        }
+        workspace.listings.push_back(listing);
+        workspace.directories_reused = workspace.directories_reused + 1;
+        progress.directories_read.fetch_add(1, std::memory_order_relaxed);
+        progress.entries_seen.fetch_add(directory.child_count, std::memory_order_relaxed);
+        progress.allocated_bytes.fetch_add(allocated, std::memory_order_relaxed);
+    }
+
+    // Opens and lists one directory from disk; queues its subdirectories.
+    void read_job(const std::uint32_t workspace_index, DirectoryJob& job, std::vector<DirectoryJob>& children) {
+        Workspace& workspace = workspaces[workspace_index];
+        int descriptor = -1;
+        if (job.parent) {
+            descriptor = ::openat((*job.parent).descriptor, job.name.data(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        } else {
+            descriptor = ::open(job.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
         const int open_error = errno;
         job.parent.reset();
         Listing listing{};
@@ -223,6 +345,9 @@ struct Scan::State final {
         listing.entry_count = result.entry_count;
         listing.state = result.state;
         workspace.listings.push_back(listing);
+        workspace.directories_listed = workspace.directories_listed + 1;
+        const bool matching = job.mode == JobMode::relist;
+        if (matching) gather_previous_children(workspace, job.previous);
 
         std::uint64_t allocated = 0;
         for (std::uint32_t k = 0; k < result.entry_count; ++k) {
@@ -232,13 +357,21 @@ struct Scan::State final {
             if (entry.kind != NodeKind::directory) continue;
             if (entry.directory_state != DirectoryState::failed) continue;
             if (entry.name.length >= job_name_capacity) continue;
+            const std::string_view name(workspace.names.data() + entry.name.offset, entry.name.length);
+            NodeIndex previous_child = no_node;
+            if (matching) previous_child = match_previous(workspace, name, entry.file_id);
+            JobMode mode = JobMode::fresh;
+            if (previous_child != no_node) mode = mode_for(options.marks[previous_child.value]);
             children.emplace_back();
             DirectoryJob& child = children.back();
             child.directory = EntryRef{workspace_index, entry_index};
-            child.parent = directory;
+            child.mode = mode;
+            child.previous = mode == JobMode::fresh ? no_node : previous_child;
+            // A copied directory is never opened, so it need not hold this one open.
+            if (mode != JobMode::copy) child.parent = directory;
             child.expected_entries = entry.expected_entries;
-            std::memcpy(child.name.data(), workspace.names.data() + entry.name.offset, entry.name.length);
-            child.name[entry.name.length] = '\0';
+            std::memcpy(child.name.data(), name.data(), name.size());
+            child.name[name.size()] = '\0';
         }
         progress.directories_read.fetch_add(1, std::memory_order_relaxed);
         progress.entries_seen.fetch_add(result.entry_count, std::memory_order_relaxed);
@@ -263,7 +396,11 @@ struct Scan::State final {
         }
         statistics.thread_count = static_cast<std::uint32_t>(workspaces.size());
         statistics.peak_open_descriptors = peak_open_descriptors.load(std::memory_order_relaxed);
-        for (const Workspace& workspace : workspaces) statistics.bulk_calls += workspace.bulk_calls;
+        for (const Workspace& workspace : workspaces) {
+            statistics.bulk_calls += workspace.bulk_calls;
+            statistics.directories_listed += workspace.directories_listed;
+            statistics.directories_reused += workspace.directories_reused;
+        }
         statistics.walk_seconds = seconds_between(started, walked);
         if (failed) {
             outcome = ScanOutcome::failed;
@@ -312,6 +449,8 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
     State& state = *state_;
     if (options.root.empty()) throw std::invalid_argument("scan root is empty");
     if (options.thread_count == 0) options.thread_count = logical_cpu_count();
+    if (options.previous && options.marks.size() != (*options.previous).nodes.size())
+        throw std::invalid_argument("reuse marks do not match the previous snapshot");
     state.options = std::move(options);
     raise_descriptor_limit();
 
@@ -326,6 +465,10 @@ Scan::Scan(ScanOptions options) : state_(std::make_unique<State>()) {
     root_job.parent = std::make_shared<DirectoryDescriptor>(root_descriptor, state.open_descriptors);
     root_job.name[0] = '.';
     root_job.name[1] = '\0';
+    if (state.options.previous) {
+        root_job.mode = mode_for(state.options.marks[root_node.value]);
+        root_job.previous = root_job.mode == JobMode::fresh ? no_node : root_node;
+    }
     state.jobs.push_back(std::move(root_job));
 
     const std::uint32_t thread_count = state.options.thread_count;

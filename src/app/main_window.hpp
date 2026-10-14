@@ -4,15 +4,19 @@
 // polls it on the UI thread; nothing on a scan worker touches a control.
 
 #include "app/treemap_view.hpp"
+#include "refresh/refresh.hpp"
 #include "scan/scanner.hpp"
 #include "scan/snapshot.hpp"
+#include "scan/snapshot_file.hpp"
 #include "space/container_space.hpp"
 
 #include "gui_forms/application.hpp"
 #include "gui_forms/basic_controls.hpp"
 #include "gui_forms/component.hpp"
+#include "gui_forms/threading.hpp"
 #include "gui_forms/timer.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -25,6 +29,40 @@ struct AppOptions final {
     // When set: write the first complete treemap there as a BMP, print the
     // status line, and close.
     std::string capture_path{};
+};
+
+// Work done off the UI thread. Each record is owned by MainWindow and
+// borrowed by its Worker until joined; the worker writes the results, then
+// sets `done` (release), and the UI thread reads them after an acquire.
+struct LoadTask final {
+    std::string path{};
+    std::shared_ptr<LoadedSnapshot> loaded{};
+    bool ok{false};
+    std::string error{};
+    double seconds{0.0};
+    std::atomic<bool> done{false};
+    static void run(const gf::CancellationFlag& cancellation, void* context);
+};
+
+struct PlanTask final {
+    // The saved scan, or null.
+    std::shared_ptr<const LoadedSnapshot> saved{};
+    std::string root{};
+    RefreshPlan plan{};
+    double seconds{0.0};
+    std::atomic<bool> done{false};
+    static void run(const gf::CancellationFlag& cancellation, void* context);
+};
+
+struct SaveTask final {
+    std::string path{};
+    std::shared_ptr<const Snapshot> snapshot{};
+    SnapshotInfo info{};
+    bool ok{false};
+    std::string error{};
+    double seconds{0.0};
+    std::atomic<bool> done{false};
+    static void run(const gf::CancellationFlag& cancellation, void* context);
 };
 
 class MainWindow final : public gf::Component {
@@ -43,7 +81,15 @@ public:
     std::shared_ptr<gf::Panel> root{};
 
 private:
+    // Launch: load the saved scan and show it, plan the refresh, scan
+    // (incrementally when the journal allows), show the result, save it.
+    enum class Phase : std::uint8_t { loading, planning, scanning, saving, idle };
+
     void poll();
+    void finish_load();
+    void finish_plan();
+    void start_save();
+    void finish_save();
     void finish_scan();
     void on_selection_changed();
     void on_reveal();
@@ -62,6 +108,21 @@ private:
     ScanStatistics statistics_{};
     std::unique_ptr<Scan> scan_{};
     std::unique_ptr<gf::Timer> poll_timer_{};
+    Phase phase_{Phase::idle};
+    std::string cache_path_{};
+    std::shared_ptr<const LoadedSnapshot> saved_{};
+    std::string refresh_reason_{};
+    JournalPosition scan_position_{};
+    // Set once the refreshed (not the saved) picture has been handed over.
+    bool refreshed_shown_{false};
+    // Each task before the worker that borrows it, so the worker is joined
+    // (destroyed) first.
+    std::unique_ptr<LoadTask> load_task_{};
+    std::unique_ptr<gf::Worker> load_worker_{};
+    std::unique_ptr<PlanTask> plan_task_{};
+    std::unique_ptr<gf::Worker> plan_worker_{};
+    std::unique_ptr<SaveTask> save_task_{};
+    std::unique_ptr<gf::Worker> save_worker_{};
     gf::ApplicationWindowHandle host_{};
     std::chrono::steady_clock::time_point started_{};
     std::string summary_{};

@@ -273,6 +273,64 @@ parent's entry count is 0, and the reader stopped before its first call.
 Fixed: a firmlink's count is treated as unknown, and at least one call is
 always made. `test_firmlink_count` guards it.
 
+## 8. The saved snapshot and the journal (stage S2, 2026-10-14)
+
+cmac keeps its last scan as a record (`src/scan/snapshot_file.hpp`: header,
+56-byte node records, name pool) and, at launch, shows it, replays the
+FSEvents journal since the position stored with it, and rereads only the
+folders that changed; everything else is copied from the record.
+
+**FSEvents replay cost**, owner's MacBook, history of the whole volume
+group from `/`:
+
+| Event ids behind | Events delivered | Replay |
+|---|---|---|
+| 20,000 | 580 | 0.10 s |
+| 200,000 | 7,908 | 0.66 s |
+| 2,000,000 | 15,382 | 8.05 s |
+
+About 4 µs per event id behind the cursor, spent in `fseventsd` (fdu found
+the same: the cost belongs to the volume's journal, not to the root). A
+replay that would take longer than 3 s is skipped for a full scan
+(`RefreshPolicy`). Paths arrive canonical (`/Users/...`), matching a
+snapshot of `/`. Live events that arrive during a long replay come flagged
+dropped; the replay therefore stops at the position taken when it began,
+and anything later is replayed next time from the journal on disk.
+
+**Measured on the M4**, `cmac-scan / --cache FILE`, warm:
+
+| | First run (no record) | Next runs (seconds to minutes later) |
+|---|---|---|
+| read the record (149 MB, 2.01 M objects) | — | 0.05 to 0.08 s |
+| plan (journal replay, reuse marks) | — | 0.02 to 0.12 s (15 to 180 changes) |
+| scan | 9.75 s full | 0.26 to 0.67 s (9 to 181 folders reread, about 386,000 copied) |
+| save the record | 0.05 s | 0.03 to 0.05 s |
+
+The app, launched twice in a row on the M4 with `--capture`: **10.3 s** from
+process start to the first complete picture with no record, **0.71 s** with
+one (window, load, replay, incremental scan, layout, paint and capture).
+
+**How exact.** `--verify` scans in full right after the refresh and compares
+node by node. The refreshed root matched the full one within 1 MiB of
+160 GiB; 101 nodes differed (a dozen files and their ancestors). Two plain
+full scans a few seconds apart differ by 11 to 12 nodes, so most of the rest
+is a live system changing between the two scans: build outputs, a stats file
+`systemstats` holds open, Chrome's and Google Updater's databases.
+
+**A change FSEvents never reports.** The first `--verify` found 628 files
+whose copied size was 1,044,480 bytes too large each: files written 38
+minutes earlier still held APFS's speculative preallocation at the first
+scan, and APFS released it lazily a minute later, with no write and no
+event. The reuse plan now rereads any folder holding a file whose
+allocation exceeds its rounded length by 64 KiB or more (not sparse,
+compressed or dataless) until it settles.
+
+**Known limits.** A file held open by a writer is reported only when it is
+closed (fdu, 2026-09-27); its size is the last one read. The record holds
+two snapshots in memory during a refresh (peak resident 632 MiB on the M4).
+No cold-cache or after-reboot launch has been measured; the journal and the
+record both survive a reboot.
+
 ## 7. How to repeat
 
 ```sh

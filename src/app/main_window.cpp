@@ -6,6 +6,7 @@
 #include "gui_forms/event.hpp"
 
 #include <cstdio>
+#include <ctime>
 #include <exception>
 #include <utility>
 
@@ -78,6 +79,33 @@ void HostReady::operator()(gf::Window&, gf::ApplicationWindowHandle handle) cons
     (*window).attach_host(handle);
 }
 
+void LoadTask::run(const gf::CancellationFlag&, void* const context) {
+    LoadTask& task = *static_cast<LoadTask*>(context);
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    if (!task.path.empty()) task.ok = read_snapshot_file(task.path, *task.loaded, task.error);
+    const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
+    task.seconds = elapsed.count();
+    task.done.store(true, std::memory_order_release);
+}
+
+void PlanTask::run(const gf::CancellationFlag&, void* const context) {
+    PlanTask& task = *static_cast<PlanTask*>(context);
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    task.plan = plan_refresh(task.saved.get(), task.root, RefreshPolicy{});
+    const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
+    task.seconds = elapsed.count();
+    task.done.store(true, std::memory_order_release);
+}
+
+void SaveTask::run(const gf::CancellationFlag&, void* const context) {
+    SaveTask& task = *static_cast<SaveTask*>(context);
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    task.ok = write_snapshot_file(task.path, *task.snapshot, task.info, task.error);
+    const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - started;
+    task.seconds = elapsed.count();
+    task.done.store(true, std::memory_order_release);
+}
+
 MainWindow::MainWindow(AppOptions options) : options_(std::move(options)) {
     root = gf::make_control<gf::Panel>(gf::StableId("cmac.root"));
     header_ = gf::make_control<gf::Panel>(gf::StableId("cmac.header"));
@@ -115,16 +143,19 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::start(gf::Window& window) {
     started_ = std::chrono::steady_clock::now();
-    ScanOptions scan_options{};
-    scan_options.root = options_.root;
-    scan_ = std::make_unique<Scan>(scan_options);
     // The container's free space and virtual memory belong beside the whole
     // volume group, not beside one folder.
     if (options_.root == "/") space_ = measure_container_space(options_.root);
-    poll_timer_ = std::make_unique<gf::Timer>(window, std::chrono::milliseconds(100));
+    cache_path_ = default_snapshot_path(options_.root);
+    poll_timer_ = std::make_unique<gf::Timer>(window, std::chrono::milliseconds(50));
     gf::on((*poll_timer_).tick(), *this, &MainWindow::poll);
+    load_task_ = std::make_unique<LoadTask>();
+    (*load_task_).path = cache_path_;
+    (*load_task_).loaded = std::make_shared<LoadedSnapshot>();
+    load_worker_ = std::make_unique<gf::Worker>(LoadTask::run, load_task_.get());
+    phase_ = Phase::loading;
     (*poll_timer_).start();
-    show_status("Scanning " + options_.root + " ...");
+    show_status("Opening the saved scan of " + options_.root + " ...");
 }
 
 void MainWindow::attach_host(const gf::ApplicationWindowHandle handle) {
@@ -136,17 +167,77 @@ void MainWindow::show_status(const std::string& text) {
 }
 
 void MainWindow::poll() {
-    if (!scan_) return;
-    if (!(*scan_).finished()) {
-        const ScanProgress& progress = (*scan_).progress();
-        const std::uint64_t entries = progress.entries_seen.load(std::memory_order_relaxed);
-        const std::uint64_t bytes = progress.allocated_bytes.load(std::memory_order_relaxed);
-        show_status("Scanning " + options_.root + ": " + format_count(entries) + " objects, " + format_bytes(bytes) +
-                    " (" + elapsed_seconds(started_) + ")");
+    if (phase_ == Phase::loading) {
+        if ((*load_task_).done.load(std::memory_order_acquire)) finish_load();
+        return;
+    }
+    if (phase_ == Phase::planning) {
+        if ((*plan_task_).done.load(std::memory_order_acquire)) finish_plan();
+        return;
+    }
+    if (phase_ == Phase::scanning) {
+        if (!(*scan_).finished()) {
+            const ScanProgress& progress = (*scan_).progress();
+            const std::uint64_t entries = progress.entries_seen.load(std::memory_order_relaxed);
+            const std::uint64_t bytes = progress.allocated_bytes.load(std::memory_order_relaxed);
+            const std::string what = refresh_reason_.empty() ? "Scanning " : "Updating ";
+            show_status(what + options_.root + ": " + format_count(entries) + " objects, " + format_bytes(bytes) +
+                        " (" + elapsed_seconds(started_) + ")");
+            return;
+        }
+        finish_scan();
+        return;
+    }
+    if (phase_ == Phase::saving) {
+        if ((*save_task_).done.load(std::memory_order_acquire)) finish_save();
         return;
     }
     (*poll_timer_).stop();
-    finish_scan();
+}
+
+// The saved scan is shown at once; the refresh is planned behind it.
+void MainWindow::finish_load() {
+    (*load_worker_).join();
+    load_worker_.reset();
+    std::unique_ptr<LoadTask> task = std::move(load_task_);
+    plan_task_ = std::make_unique<PlanTask>();
+    (*plan_task_).root = options_.root;
+    if ((*task).ok) {
+        saved_ = (*task).loaded;
+        // The snapshot is shared from the loaded record it lives in.
+        snapshot_ = std::shared_ptr<const Snapshot>(saved_, &(*saved_).snapshot);
+        (*plan_task_).saved = saved_;
+        const std::int64_t age = static_cast<std::int64_t>(std::time(nullptr)) - (*saved_).info.written_unix_seconds;
+        char text[160] = {};
+        std::snprintf(text, sizeof text, "Showing the scan saved %lld min ago (opened in %.2f s); checking for changes ...",
+                      static_cast<long long>(age / 60), (*task).seconds);
+        show_status(text);
+        (*treemap_).set_snapshot(snapshot_, space_);
+    } else {
+        show_status("Scanning " + options_.root + " ...");
+    }
+    plan_worker_ = std::make_unique<gf::Worker>(PlanTask::run, plan_task_.get());
+    phase_ = Phase::planning;
+}
+
+void MainWindow::finish_plan() {
+    (*plan_worker_).join();
+    plan_worker_.reset();
+    std::unique_ptr<PlanTask> task = std::move(plan_task_);
+    RefreshPlan& plan = (*task).plan;
+    scan_position_ = plan.position;
+    refresh_reason_ = plan.incremental ? plan.reason : std::string{};
+    ScanOptions scan_options{};
+    scan_options.root = options_.root;
+    if (plan.incremental) {
+        scan_options.previous = std::shared_ptr<const Snapshot>(saved_, &(*saved_).snapshot);
+        scan_options.marks = std::move(plan.reuse.marks);
+    } else if (saved_) {
+        show_status("Scanning " + options_.root + " again: " + plan.reason);
+    }
+    started_ = std::chrono::steady_clock::now();
+    scan_ = std::make_unique<Scan>(std::move(scan_options));
+    phase_ = Phase::scanning;
 }
 
 void MainWindow::finish_scan() {
@@ -156,20 +247,54 @@ void MainWindow::finish_scan() {
     if (outcome != ScanOutcome::complete) {
         show_status("The scan of " + options_.root + " did not complete: " + (*scan_).failure());
         scan_.reset();
+        phase_ = Phase::idle;
         return;
     }
     snapshot_ = std::make_shared<const Snapshot>((*scan_).take_snapshot());
     scan_.reset();
     const Node& volume = (*snapshot_).nodes[root_node.value];
-    char walk[32] = {};
-    std::snprintf(walk, sizeof walk, "%.1f s", statistics_.walk_seconds);
+    char walk[64] = {};
+    std::snprintf(walk, sizeof walk, "%.1f s", statistics_.walk_seconds + statistics_.build_seconds);
     summary_ = options_.root + ": " + format_count(volume.descendant_count) + " objects, " +
-               format_bytes(volume.allocated_bytes) + " in " + walk + "; free " + format_bytes(space_.free_bytes) +
+               format_bytes(volume.allocated_bytes) + "; free " + format_bytes(space_.free_bytes) +
                ", virtual memory " + format_bytes(space_.virtual_memory_bytes);
+    if (refresh_reason_.empty()) {
+        summary_ += "; scanned in " + std::string(walk);
+    } else {
+        summary_ += "; updated in " + std::string(walk) + " (" + format_count(statistics_.directories_listed) +
+                    " folders reread, " + format_count(statistics_.directories_reused) + " unchanged)";
+    }
     if (statistics_.refused_directories > 0)
         summary_ += "; " + format_count(statistics_.refused_directories) + " protected folders not counted";
     show_status(summary_);
+    refreshed_shown_ = true;
     (*treemap_).set_snapshot(snapshot_, space_);
+    start_save();
+}
+
+void MainWindow::start_save() {
+    if (cache_path_.empty()) {
+        phase_ = Phase::idle;
+        return;
+    }
+    save_task_ = std::make_unique<SaveTask>();
+    (*save_task_).path = cache_path_;
+    (*save_task_).snapshot = snapshot_;
+    (*save_task_).info.root = options_.root;
+    (*save_task_).info.journal_event_id = scan_position_.event_id;
+    (*save_task_).info.journal_store = scan_position_.store;
+    (*save_task_).info.system_build = current_system_build();
+    (*save_task_).info.written_unix_seconds = static_cast<std::int64_t>(std::time(nullptr));
+    save_worker_ = std::make_unique<gf::Worker>(SaveTask::run, save_task_.get());
+    phase_ = Phase::saving;
+}
+
+void MainWindow::finish_save() {
+    (*save_worker_).join();
+    save_worker_.reset();
+    std::unique_ptr<SaveTask> task = std::move(save_task_);
+    if (!(*task).ok) show_status(summary_ + "; the scan could not be saved: " + (*task).error);
+    phase_ = Phase::idle;
 }
 
 void MainWindow::on_selection_changed() {
@@ -211,6 +336,9 @@ void MainWindow::on_reveal() {
 }
 
 void MainWindow::on_picture_ready() {
+    // The saved picture keeps the status the load wrote; only the refreshed
+    // one reports its layout and paint.
+    if (!refreshed_shown_) return;
     char timing[96] = {};
     std::snprintf(timing, sizeof timing, "; layout %.0f ms, paint %.0f ms, %zu tiles",
                   (*treemap_).layout_milliseconds(), (*treemap_).paint_milliseconds(), (*treemap_).tile_count());

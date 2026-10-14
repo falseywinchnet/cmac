@@ -4,6 +4,7 @@
 // is immutable once published; a rescan builds a new one.
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -103,5 +104,9 @@ struct Snapshot final {
         return result;
     }
 };
+
+// The node's absolute path ("/Users/me/file"), built from its ancestors and
+// the root's name (the scanned path).
+[[nodiscard]] std::string path_of(const Snapshot& snapshot, NodeIndex node);
 
 } // namespace cmac
