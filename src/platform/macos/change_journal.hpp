@@ -48,7 +48,7 @@ struct JournalReplay final {
 
 // What replaying from since to until is expected to cost: fseventsd works
 // through the whole volume's journal behind the cursor, about 4 µs per event
-// id on the owner's MacBook (SCANNER_STUDY.md §8).
+// id on the owner's MacBook (SCANNER_STUDY.md §6b).
 [[nodiscard]] double estimated_replay_seconds(std::uint64_t since, std::uint64_t until);
 
 } // namespace cmac

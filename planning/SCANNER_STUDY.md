@@ -273,7 +273,7 @@ parent's entry count is 0, and the reader stopped before its first call.
 Fixed: a firmlink's count is treated as unknown, and at least one call is
 always made. `test_firmlink_count` guards it.
 
-## 8. The saved snapshot and the journal (stage S2, 2026-10-14)
+## 6b. The saved snapshot and the journal (stage S2, 2026-10-14)
 
 cmac keeps its last scan as a record (`src/scan/snapshot_file.hpp`: header,
 56-byte node records, name pool) and, at launch, shows it, replays the

@@ -88,7 +88,7 @@ Depends on S1.
 Gate: time from launch to a complete, current picture on the second launch,
 and zero misses against a full walk after a scripted churn fixture.
 
-Gate record so far (2026-10-14, `SCANNER_STUDY.md` §8): the second launch
+Gate record so far (2026-10-14, `SCANNER_STUDY.md` §6b): the second launch
 on the M4 reaches a complete, current picture in 0.71 s (10.3 s with no
 record); `cmac_refresh_tests` passes (record round trip, damaged records
 rejected, an incremental scan after adds, removals, growth, a new tree and a
