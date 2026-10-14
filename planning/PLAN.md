@@ -48,6 +48,18 @@ and timings. No window yet.
 - Cancellation checked between directories. Progress as atomic counters.
 - The finished tree published as an immutable snapshot.
 
+Gate record so far (2026-10-14, `SCANNER_STUDY.md` §6a):
+- done: built with LLVM 22.1.8 on the M4; fixture tests pass (hard links
+  once, a clone, a sparse file, a symbolic link loop, a refused folder, a
+  5,000-entry folder, a 300-deep chain, one against many threads, read to
+  the end, cancellation, the firmlink count);
+- done: warm wall time and kernel CPU at parity with the probe on both
+  machines, with exactly the probe's object counts;
+- open: cold runs (needs the owner's `sudo purge`); peak memory, measured at
+  about 230 bytes per object, which is too much (target: release the
+  workspaces as the snapshot is built); cancellation latency; a mounted disk
+  image fixture; a directory changing during its read.
+
 Gate: on the M4 and the MacBook, warm and cold (the owner runs
 `sudo purge` before each cold run), scanning `/`:
 - entry counts within 0.1% of the probe's on the same machine and minute;
@@ -69,6 +81,9 @@ Depends on S1.
   user's open writers (libproc); revisit only changed folders.
 - Skip a subtree whose recursive generation count has not moved (only
   folders the system marked itself; cmac never marks, D6).
+- Keep the sealed System volume's part of the snapshot against the sealed
+  snapshot's identity and reuse it until the OS changes: it costs 47 µs per
+  object against Data's 13 µs, 40% of an M4 walk (`SCANNER_STUDY.md` §6a).
 
 Gate: time from launch to a complete, current picture on the second launch,
 and zero misses against a full walk after a scripted churn fixture.

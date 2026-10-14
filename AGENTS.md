@@ -63,11 +63,13 @@ need review against the full document.
 - One execution context per piece of mutable state:
   - The **UI thread** owns the window, the controls, the published tree
     snapshot it is showing, selection, and the treemap layout.
-  - The **scan** runs on one `Worker`. That worker owns an `AtomicThreadPool`
-    whose tasks drain a shared directory queue. Each task owns its own
-    workspace (attribute buffer, node arena, name pool); only the queue and
-    the progress counters are shared, and they are synchronized at their
-    boundary.
+  - The **scan** runs on one `Worker` per CPU, all draining one shared
+    directory queue. Each owns its own workspace (attribute buffer, entry
+    arena, name pool); only the queue and the progress counters are shared,
+    and they are synchronized at their boundary. The worker that drains last
+    builds the snapshot. (`AtomicThreadPool::run` executes batches of up to
+    64 tasks per thread on the calling thread, one after another, so it
+    suits data-parallel batches, not long-running drains.)
   - The **paint** may split a frame into bands on an `AtomicThreadPool` owned
     by the UI thread; each band writes disjoint rows of the target.
 - Results cross to the UI thread by publication, as PlaySuite's `Dealer`
@@ -116,6 +118,8 @@ effect against that record.
 - `src/treemap/`: squarified layout, cushion coefficients, the shading kernel.
 - `src/app/`: the GUI.Forms window, ribbon, folder list and selection.
 - `src/platform/macos/`: Objective-C++ (Finder reveal, Foundation-only keys).
+- `src/tools/`: command-line tools (`cmac-scan`, the scanner's measurement
+  tool).
 - `tests/`: fixture trees built in a temporary directory at test time.
 - `planning/`: the programme, studies and decisions.
 - `evidence/`: measurement records and the probes that produced them, kept
@@ -123,7 +127,7 @@ effect against that record.
 
 ## Building
 
-Not yet. Stage S1 adds the CMake project. GUI.Forms cannot be configured on
-the owner's MacBook (it needs LLVM 22.1.8 and its bundled runtime); build and
-test on the Mac mini M4 and in CI, as GUI.Forms and PlaySuite do. Copy their
-recipe exactly; do not improvise toolchains or caches.
+`docs/BUILDING.md`. cmac builds only with GUI.Forms' pinned LLVM 22.1.8
+toolchain file and runtime; the owner's MacBook lacks them, so build and
+test on the Mac mini M4 (`m4build`) and in CI, as GUI.Forms and PlaySuite
+do. Copy their recipe exactly; do not improvise toolchains or caches.

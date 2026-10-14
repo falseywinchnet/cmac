@@ -226,6 +226,53 @@ while the totals themselves drifted and were not authoritative.
 - Private size as a second pass over only the `EF_MAY_SHARE_BLOCKS` files
   (27 k of 906 k here), with `getattrlist` per file.
 
+## 6a. cmac-scan, first measurements (2026-10-14)
+
+The S1 scanner (`src/scan/`), built with LLVM 22.1.8 and GUI.Forms' runtime,
+one `gui_forms::Worker` per thread. Warm cache, `cmac-scan /`.
+
+**Mac mini M4** (10 CPUs: 4 performance, 6 efficiency; macOS 26.5; load
+average about 2):
+
+| | cmac-scan, 10 threads | probe, 10 threads |
+|---|---|---|
+| walk | 9.58, 9.63, 9.73 s | 9.52, 9.63, 9.64 s |
+| kernel CPU | 59 s | 59 s |
+| objects | 2,008,806 | the same, counted as the probe counts |
+| snapshot build | 0.06 s | — |
+| peak resident | 450 to 482 MiB | — |
+
+| Threads | 4 | 6 | 8 | 10 | 12 | 16 | 20 |
+|---|---|---|---|---|---|---|---|
+| walk (s) | 11.1 | 9.0 | 9.1 | 9.7 | 9.9 | 10.2 | 10.0 |
+| kernel CPU (s) | 15 | 25 | 42 | 60 | 71 | 83 | 84 |
+
+Beyond 6 threads the kernel burns more CPU for no gain: something inside
+it is serialized. It is not per volume. Data alone took 5.7 s, System alone
+3.9 s, and both at once 8.8 s, about their sum.
+
+The sealed System volume is the expensive one: **47 µs of kernel CPU per
+object against 13 µs on Data** (498 k objects, 23.6 s CPU; 1.52 M objects,
+19.8 s). It is a quarter of the objects and 40% of the walk. It changes only
+with an OS update, so its part of the snapshot can be kept against the
+sealed snapshot's identity and reused (S2), leaving about 5.7 s for a whole
+M4 scan.
+
+**Owner's MacBook** (as §1; load average 6.3): cmac-scan 10.4, 10.8 and 16.3
+s; the probe 12.0, 12.2 and 12.6 s, interleaved. Parity within this
+machine's noise. 1.54 M objects, peak resident 275 to 284 MiB.
+
+**Totals now differ from the probe's, correctly.** The probe summed every
+hard link. One 223 GiB sparse disk image here has two links; cmac counts it
+once, so its logical total is 460 GiB against the probe's 685 GiB.
+
+**The bug the M4 found.** The first M4 run walked only the System volume
+(486 k objects). The firmlinked folders (`/Users`, `/Applications`,
+`/Library`, `/private`, …) are empty stubs on the System volume, so the
+parent's entry count is 0, and the reader stopped before its first call.
+Fixed: a firmlink's count is treated as unknown, and at least one call is
+always made. `test_firmlink_count` guards it.
+
 ## 7. How to repeat
 
 ```sh
