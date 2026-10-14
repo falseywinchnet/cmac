@@ -96,7 +96,11 @@ The container map: each volume's use, free space, and virtual mapping
 (swap files and the sleep image, D2), in yellow; snapshots, the other
 volumes and the residual shown in neutral tiles. Free space from `statfs`; purgeable space through
 Foundation's volume capacity keys (in `src/platform/macos/`); a signed,
-labelled residual for space no file accounts for.
+labelled residual for space no file accounts for. The clone accounting of
+D5: a second pass reads `ATTR_CMNEXT_PRIVATESIZE` for the files flagged
+`may_share_blocks` only (27 k of 906 k on the study machine), each file is
+sized by its private bytes, and the difference appears once as a "shared
+by clones" tile.
 
 Gate: the tiles sum to the container's capacity, with the residual shown
 and explained on the study machine and the M4.
@@ -161,14 +165,21 @@ Answered by the owner on 2026-10-14:
   folder and rescans only what changed. It writes nothing else.
 - **D8 Repository:** public, MIT.
 
+Answered on 2026-10-14, second round:
+
+- **D4 Red tiers:** R1 system temporary, R2 caches and R3 logs are red,
+  with purgeable files anywhere. R4 (build output and package caches) is
+  not red.
+- **D5 Clones:** each file is sized by its unique (private) bytes, and the
+  blocks clones share appear once, as a separate tile. This needs the
+  private-size pass over the files that may share blocks (added to S3).
+- **D9 Floor:** Apple silicon, macOS 14 or later (GUI.Forms' contract).
+- **Ribbon (D1, who and when):** this programme's author builds the
+  reusable ribbon in GUI.Forms next, under GUI.Forms' own programme, while
+  cmac's later stages proceed.
+
 ## Open decisions (the owner's)
 
 - **D3 Ownership lines.** Boundaries of the user and system regions, and
   the line style (shown as labelled candidates on a real scan first).
-- **D4 Red tiers.** Which of R1 to R4 in `CLASSIFICATION_STUDY.md` are red,
-  and whether the Trash gets its own mark.
-- **D5 Clones.** Size each file by allocation (clones counted per copy, as
-  Finder does) or by private size, with shared blocks shown as one
-  separate tile.
-- **D9 Floor.** macOS 14 or later on Apple silicon only (the GUI.Forms
-  runtime contract), or Intel too.
+- **D10 Trash.** Whether the Trash gets its own mark (it is never red).

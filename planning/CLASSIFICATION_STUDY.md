@@ -1,7 +1,7 @@
 # Classification study: yellow, red and the ownership lines
 
 Recorded 2026-10-14. This proposes what cmac colours and why. The owner
-chooses the red tiers (decision D4 in `PLAN.md`); nothing here is final.
+chose R1, R2 and R3 as red on 2026-10-14 (D4); R4 is not red.
 
 cmac is diagnostic. A red rectangle says "cmac believes this folder holds
 temporary data". It never says "delete this", and cmac offers no way to.

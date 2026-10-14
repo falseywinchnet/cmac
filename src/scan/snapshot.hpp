@@ -75,7 +75,7 @@ struct Node final {
     std::uint32_t descendant_count{0};
     // For a file: its allocation on disk, all forks. For a directory: the sum
     // over its descendants, hard-link repeats excluded. Clones are counted
-    // once per copy (decision D5 is still open).
+    // once per copy here; the private-size pass of S3 resizes them (D5).
     std::uint64_t allocated_bytes{0};
     // Same rule, for logical length (the data fork's length).
     std::uint64_t logical_bytes{0};
