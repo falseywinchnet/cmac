@@ -50,7 +50,11 @@ m4build -- zsh -lc 'export PATH=/opt/homebrew/opt/llvm@22/bin:/opt/homebrew/bin:
   ctest --test-dir .build/app --output-on-failure'
 ```
 
-The bundle is `.build/app/cmac.app`. `--capture FILE.bmp` writes the first
+The bundle is `.build/app/cmac.app`; it finds its libraries on the M4
+only. `tools/package_macos.sh .build/app "$GUI_FORMS_LLVM_RUNTIME" .build/dist`
+stages a self-contained `.build/dist/cmac.app` (GUI.Forms and the LLVM
+runtime in `Contents/Frameworks`, signed ad hoc) that runs on any Apple
+silicon Mac with macOS 14 or later. `--capture FILE.bmp` writes the first
 complete treemap and closes. Opened from Finder or `open`, macOS asks for
 consent at each protected folder and the scan waits for the answer; run over
 ssh, those folders are refused at once instead. Configure with

@@ -118,7 +118,9 @@ void MainWindow::start(gf::Window& window) {
     ScanOptions scan_options{};
     scan_options.root = options_.root;
     scan_ = std::make_unique<Scan>(scan_options);
-    space_ = measure_container_space(options_.root);
+    // The container's free space and virtual memory belong beside the whole
+    // volume group, not beside one folder.
+    if (options_.root == "/") space_ = measure_container_space(options_.root);
     poll_timer_ = std::make_unique<gf::Timer>(window, std::chrono::milliseconds(100));
     gf::on((*poll_timer_).tick(), *this, &MainWindow::poll);
     (*poll_timer_).start();
